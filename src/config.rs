@@ -141,6 +141,8 @@ pub enum IconStyle {
     Tile,
     /// Round glass plate. Kept for configs that ask for it.
     Orb,
+    /// Put back the icon the item had before Nook ever touched it (from journal backups).
+    Original,
     /// Keep the stock icon.
     None,
 }
@@ -154,6 +156,7 @@ impl IconStyle {
             "tile" => Self::Tile,
             "orb" => Self::Orb,
             "none" => Self::None,
+            "original" => Self::Original,
             _ => return None,
         })
     }

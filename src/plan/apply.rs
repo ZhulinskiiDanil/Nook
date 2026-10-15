@@ -548,6 +548,10 @@ fn execute(
                     },
                 )?;
             }
+            Action::RestyleIcon { style, .. } if style == "original" => {
+                let kind = styled_kind(&r, &by_id).context("item cannot be restyled")?;
+                restore_original(run, &r, &path, kind)?;
+            }
             Action::RestyleIcon { .. } => {
                 let kind = styled_kind(&r, &by_id).context("item cannot be restyled")?;
                 let look = look_for(&sp.plan, &r, a, env.config).context("unknown style")?;
@@ -1136,6 +1140,151 @@ pub fn refers_to_nook_icon(bytes: &[u8]) -> bool {
         String::from_utf16_lossy(&w).to_lowercase()
     };
     decode(bytes).contains(needle) || bytes.get(1..).is_some_and(|b| decode(b).contains(needle))
+}
+
+/// What a folder looked like before Nook: decided by the FIRST change Nook ever made to it,
+/// walking plans in creation order. If that first desktop.ini write had no backup, the folder
+/// had no desktop.ini; otherwise the backup is the original. Same for folder attributes.
+/// Returns (original desktop.ini copy, original folder attrs, original had no desktop.ini).
+fn folder_original(folder: &Path, store: &Store) -> (Option<PathBuf>, Option<u32>, bool) {
+    let ini = folder.join("desktop.ini").to_string_lossy().to_lowercase();
+    let dir = folder.to_string_lossy().to_lowercase();
+    let mut plans = store.list();
+    plans.sort_by(|a, b| a.created.cmp(&b.created));
+    let mut first_ini: Option<Option<PathBuf>> = None;
+    let mut attrs = None;
+    for sp in plans {
+        let Ok(lines) = journal::read(&store.journal_file(&sp.id)) else {
+            continue;
+        };
+        for l in lines {
+            if l.mark != Mark::Intent {
+                continue;
+            }
+            match l.step {
+                Step::WriteFile { path, backup, .. }
+                    if first_ini.is_none() && path.to_string_lossy().to_lowercase() == ini =>
+                {
+                    first_ini = Some(backup);
+                }
+                Step::SetAttrs { path, old, .. }
+                    if attrs.is_none() && path.to_string_lossy().to_lowercase() == dir =>
+                {
+                    attrs = Some(old);
+                }
+                _ => {}
+            }
+        }
+    }
+    match first_ini {
+        Some(Some(b)) => (b.exists().then_some(b), attrs, false),
+        Some(None) => (None, attrs, true),
+        None => (None, attrs, false),
+    }
+}
+
+/// `restyle_icon` with style `original`: put back the pre-Nook icon (journaled, undoable).
+fn restore_original(run: &mut Run, r: &str, path: &Path, kind: crate::scan::Kind) -> Result<()> {
+    let journal_dir = run.env.store.journal.clone();
+    if kind == crate::scan::Kind::Folder {
+        let (ini_backup, attrs, nook_made) = folder_original(path, run.env.store);
+        let ini = path.join("desktop.ini");
+        match ini_backup {
+            // The folder had its own desktop.ini (e.g. a custom icon): write it back.
+            Some(b) => {
+                let orig = std::fs::read(&b)?;
+                let old_attrs = ini.exists().then(|| get_attrs(&ini)).transpose()?;
+                let keep = ini
+                    .exists()
+                    .then(|| free_name(&run.park, "desktop.ini.nook", &|p| p.exists()));
+                let park = free_name(&run.park, "desktop.ini", &|p| p.exists());
+                let pk = run.park.clone();
+                let step = Step::WriteFile {
+                    path: ini.clone(),
+                    backup: keep.clone(),
+                    park,
+                    old_attrs,
+                };
+                run.step("restore_icon", Some(r), step, || {
+                    std::fs::create_dir_all(&pk)?;
+                    if let Some(k) = &keep {
+                        set_attrs(&ini, ATTR_NORMAL)?;
+                        move_path(&ini, k)?;
+                    }
+                    std::fs::write(&ini, &orig)?;
+                    set_attrs(&ini, ATTR_HIDDEN | ATTR_SYSTEM)?;
+                    Ok(Outcome::Done)
+                })?;
+            }
+            // Nook created the desktop.ini: take it away (into the plan's park — never deleted).
+            None if nook_made && ini.exists() => {
+                let to = free_name(&run.park, "desktop.ini", &|p| p.exists());
+                std::fs::create_dir_all(&run.park)?;
+                let step = Step::Move {
+                    item: Some(r.into()),
+                    from: ini.clone(),
+                    to: to.clone(),
+                    why: "restore_icon".into(),
+                };
+                run.step("restore_icon", Some(r), step, || {
+                    set_attrs(&ini, ATTR_NORMAL)?;
+                    move_path(&ini, &to).map(|_| Outcome::Done)
+                })?;
+                if let Some(old) = attrs {
+                    let cur_attrs = get_attrs(path)?;
+                    if cur_attrs != old {
+                        run.step(
+                            "restore_icon",
+                            Some(r),
+                            Step::SetAttrs {
+                                path: path.to_path_buf(),
+                                old: cur_attrs,
+                                new: old,
+                            },
+                            || set_attrs(path, old).map(|_| Outcome::Done),
+                        )?;
+                    }
+                }
+            }
+            None => {}
+        }
+        notify_item(path);
+        return Ok(());
+    }
+    // Shortcut: write the pre-Nook bytes back into the same file (keeps its FileId).
+    let Some(orig) = original_backup(path, &journal_dir) else {
+        bail!("{}: no pre-Nook copy found in the journals", path.display());
+    };
+    let bytes = std::fs::read(&orig)?;
+    let backup = free_name(
+        &run.park,
+        &format!("{}.bak", path.file_name().unwrap().to_string_lossy()),
+        &|p| p.exists(),
+    );
+    let park = free_name(
+        &run.park,
+        &path.file_name().unwrap().to_string_lossy(),
+        &|p| p.exists(),
+    );
+    let pk = run.park.clone();
+    let step = Step::ModifyFile {
+        path: path.to_path_buf(),
+        backup: backup.clone(),
+        park,
+    };
+    run.step("restore_icon", Some(r), step, || {
+        use std::io::Write;
+        std::fs::create_dir_all(&pk)?;
+        std::fs::copy(path, &backup)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        f.write_all(&bytes)?;
+        Ok(Outcome::Done)
+    })?;
+    notify_item(path);
+    Ok(())
 }
 
 /// A journaled pre-change copy of `path` that does not itself point at a Nook icon.

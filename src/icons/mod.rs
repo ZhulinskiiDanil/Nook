@@ -194,6 +194,7 @@ fn lifted(base: &Pixmap) -> Pixmap {
 pub fn render(style: IconStyle, shape: Shape, base: &Pixmap, accent: Color) -> Pixmap {
     match style {
         IconStyle::Lifted => return lifted(base),
+        IconStyle::Original => return base.clone(),
         IconStyle::Tint => return full(&tint(base, accent), 1.0),
         IconStyle::Muted => return full(&muted(base, accent), 1.0),
         _ => {}
@@ -229,7 +230,9 @@ pub fn render(style: IconStyle, shape: Shape, base: &Pixmap, accent: Color) -> P
             rim.set_color(Color::from_rgba8(255, 255, 255, 90));
             base.clone()
         }
-        IconStyle::Muted | IconStyle::Lifted | IconStyle::Tint => unreachable!("handled above"),
+        IconStyle::Muted | IconStyle::Lifted | IconStyle::Tint | IconStyle::Original => {
+            unreachable!("handled above")
+        }
         IconStyle::None => return base.clone(),
     };
     pm.fill_path(&path, &fill, FillRule::Winding, Transform::identity(), None);
