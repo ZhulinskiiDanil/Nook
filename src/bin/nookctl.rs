@@ -67,6 +67,25 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Move shortcuts from the Public Desktop to yours (UAC prompt) so Nook can restyle them.
+    /// `--undo` moves them back.
+    AdoptPublic {
+        /// Only these file names (default: all .lnk/.url on the Public Desktop).
+        names: Vec<String>,
+        #[arg(long)]
+        undo: bool,
+        /// Internal: the elevated half.
+        #[arg(long, hide = true)]
+        elevated: bool,
+        #[arg(long, hide = true)]
+        public: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        user: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        record: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        report: Option<PathBuf>,
+    },
     /// Undo the last applied plan, or the given one.
     Undo { plan_id: Option<String> },
     /// Applied / undone / failed plans.
@@ -303,6 +322,61 @@ fn main() -> Result<()> {
         Command::Mcp => unreachable!(),
         Command::Apply { plan_id } => ipc("apply_plan", serde_json::json!({ "id": plan_id }))?,
         Command::Undo { plan_id } => ipc("undo", serde_json::json!({ "plan_id": plan_id }))?,
+        Command::AdoptPublic {
+            names,
+            undo,
+            elevated,
+            public,
+            user,
+            record,
+            report,
+        } => {
+            if elevated {
+                // Elevated half: paths come from the unelevated parent (never this profile's).
+                let (record, report) = (record.context("--record")?, report.context("--report")?);
+                let lines = if undo {
+                    nook::adopt::give_back(&record)
+                } else {
+                    nook::adopt::adopt(
+                        &public.context("--public")?,
+                        &user.context("--user")?,
+                        &record,
+                        &names,
+                    )
+                };
+                let text = match &lines {
+                    Ok(l) => l.join("\n"),
+                    Err(e) => format!("ERROR: {e:#}"),
+                };
+                std::fs::write(&report, text)?;
+                std::process::exit(if lines.is_ok() { 0 } else { 2 });
+            }
+            let d = Desktops::resolve()?;
+            require_live(&d)?;
+            let record = dirs.data_dir.join("adopted.json");
+            let report = dirs.data_dir.join("adopt-report.txt");
+            let q = |p: &std::path::Path| format!("\"{}\"", p.display());
+            let mut args = format!(
+                "adopt-public --elevated --public {} --user {} --record {} --report {}",
+                q(&d.public),
+                q(&d.user),
+                q(&record),
+                q(&report)
+            );
+            if undo {
+                args.push_str(" --undo");
+            }
+            for n in &names {
+                args.push_str(&format!(" \"{n}\""));
+            }
+            println!("Asking for administrator rights (UAC)…");
+            let code = nook::adopt::run_elevated(&args)?;
+            print!("{}", std::fs::read_to_string(&report).unwrap_or_default());
+            println!();
+            if code != 0 {
+                bail!("elevated step failed (exit code {code})");
+            }
+        }
         Command::Preview { plan_id, out } => {
             let store = nook::plan::store::Store::new(&dirs.data_dir);
             let sp = store.load(&plan_id)?;

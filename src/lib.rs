@@ -1,6 +1,7 @@
 //! Nook — keeps the Windows desktop clean. Corners give order; Claude Code decides
 //! what goes where; Nook previews, applies and undoes.
 
+pub mod adopt;
 pub mod config;
 pub mod daemon;
 pub mod doctor;

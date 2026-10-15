@@ -454,7 +454,8 @@ pub fn scan_with(
                 .filter(|(b, _)| attrs & b != 0)
                 .map(|(_, n)| *n)
                 .collect(),
-            writable: r.source == Source::User && attrs & 0x1 == 0,
+            // ReadOnly on a folder only tells Explorer to read its desktop.ini; it does not block writes.
+            writable: r.source == Source::User && (attrs & 0x1 == 0 || r.meta.is_dir()),
             cell: view.map(|v| v.0),
             group: None,
             caption_hidden: matches!(kind, Kind::Shortcut | Kind::Url) && caption_is_blank(&stem),

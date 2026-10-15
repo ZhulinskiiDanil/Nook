@@ -36,9 +36,18 @@ impl Geom {
             c.row * self.step_y + self.origin.1 + self.view_offset.1,
         )
     }
+    /// Top-left of the icon image. Explorer's item position is already the icon's left edge
+    /// (the grid origin carries the centering), so only a small top inset is added.
     pub fn icon_pos(&self, c: Cell) -> (i32, i32) {
         let (x, y) = self.slot(c);
-        (x + (self.step_x - self.icon) / 2, y + 2)
+        (x, y + 2)
+    }
+
+    /// Caption box (x, width): one grid step wide, centered under the icon.
+    pub fn caption_box(&self, c: Cell) -> (i32, i32) {
+        let (ix, _) = self.icon_pos(c);
+        let w = self.step_x - 2;
+        (ix + self.icon / 2 - w / 2, w)
     }
 }
 

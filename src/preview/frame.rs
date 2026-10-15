@@ -106,6 +106,12 @@ pub fn build(
 
     let outcome = render::outcome(&sp.plan, cols, rows, config);
     let mut cache: HashMap<String, Option<Arc<Pixmap>>> = HashMap::new();
+    // Icons the plan restyles: show the new look in the preview, not the old icon.
+    let styled = styled_icons(scan, sp, config);
+    let new_folder_style = styled.get("new:").cloned();
+    for (path, pm) in styled {
+        cache.insert(path, Some(pm));
+    }
     let size = geom.icon;
     let mut icon_of = |p: &str| -> Option<Arc<Pixmap>> {
         cache
@@ -118,9 +124,11 @@ pub fn build(
             })
             .clone()
     };
-    let folder = sources::shell_icon(&std::env::temp_dir().to_string_lossy(), size)
-        .ok()
-        .map(Arc::new);
+    let folder = new_folder_style.or_else(|| {
+        sources::shell_icon(&std::env::temp_dir().to_string_lossy(), size)
+            .ok()
+            .map(Arc::new)
+    });
     let scene = render::scene(
         &scan.items,
         &sp.plan,
@@ -134,13 +142,13 @@ pub fn build(
     let font = sources::caption_font(mon.dpi);
     let line = sources::caption_line_height(&font);
     let job = |c: &render::Caption| {
-        let (x, _) = geom.slot(c.cell);
+        let (x, w) = geom.caption_box(c.cell);
         let (_, iy) = geom.icon_pos(c.cell);
         TextJob {
             text: c.text.clone(),
-            x: x + 1,
+            x,
             y: iy + geom.icon + 4,
-            w: geom.step_x - 2,
+            w,
             max_lines: 2,
             single_line: false,
         }
@@ -177,6 +185,69 @@ pub fn build(
         live_wallpaper: live,
         build_ms: t0.elapsed().as_millis(),
     })
+}
+
+/// Styled icon per item path (lowercase) for every restyle/dim the plan makes; key `"new:"`
+/// holds the style for folders the plan creates. Best effort: failures fall back to the stock icon.
+fn styled_icons(
+    scan: &ScanResult,
+    sp: &StoredPlan,
+    config: &Config,
+) -> HashMap<String, Arc<Pixmap>> {
+    use crate::config::IconStyle;
+    use crate::icons::Shape;
+    use crate::plan::model::{Action, NEW_PREFIX};
+    let mut out = HashMap::new();
+    if !config.icons.enabled {
+        return out;
+    }
+    let accent = render::parse_hex(&config.icons.accent);
+    let in_projects = |r: &str| sp.plan.layout.projects.iter().any(|e| e.item() == r);
+    let by_id: HashMap<&str, &crate::scan::Item> =
+        scan.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    for a in &sp.plan.actions {
+        let Some(r) = a.item() else { continue };
+        let style = match a {
+            Action::RestyleIcon { style, .. } => match style.as_str() {
+                "orb" => IconStyle::Orb,
+                "muted" => IconStyle::Muted,
+                _ => IconStyle::Tile,
+            },
+            Action::Dim { value: true, .. } => IconStyle::Muted,
+            _ => continue,
+        };
+        let shape = if style == IconStyle::Orb || (style == IconStyle::Muted && in_projects(r)) {
+            Shape::Circle
+        } else {
+            Shape::Squircle
+        };
+        let (key, base) = match by_id.get(r) {
+            Some(i) if crate::plan::validate::styleable(i.kind) && i.writable => {
+                let base = i
+                    .shortcut
+                    .as_ref()
+                    .and_then(|s| s.target.clone())
+                    .filter(|t| std::path::Path::new(t).exists())
+                    .unwrap_or_else(|| i.path.clone());
+                (i.path.to_lowercase(), base)
+            }
+            None if r.starts_with(NEW_PREFIX) => (
+                "new:".to_string(),
+                std::env::temp_dir().to_string_lossy().into_owned(),
+            ),
+            _ => continue,
+        };
+        match crate::icons::base_icon(&base) {
+            Ok(b) => {
+                out.insert(
+                    key,
+                    Arc::new(crate::icons::render(style, shape, &b, accent)),
+                );
+            }
+            Err(e) => tracing::debug!("preview style for {r}: {e:#}"),
+        }
+    }
+    out
 }
 
 /// Gathers [`ViewFacts`]. STA/UI thread only.
