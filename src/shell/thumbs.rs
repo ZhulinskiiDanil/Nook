@@ -32,6 +32,17 @@ pub fn shell_image(path: &Path, max: i32) -> Result<Rgba> {
                 SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK,
             )
             .context("IShellItemImageFactory::GetImage")?;
+        hbitmap_to_rgba(hbm)
+    }
+}
+
+/// Converts (and frees) a shell HBITMAP to straight RGBA.
+///
+/// # Safety
+/// `hbm` must be a valid bitmap handle the caller owns; it is deleted here.
+pub unsafe fn hbitmap_to_rgba(hbm: windows::Win32::Graphics::Gdi::HBITMAP) -> Result<Rgba> {
+    // SAFETY: per the function contract; GDI objects are released.
+    unsafe {
         let mut bm = BITMAP::default();
         let got = GetObjectW(
             HGDIOBJ(hbm.0),

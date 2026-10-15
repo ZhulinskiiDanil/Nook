@@ -14,6 +14,7 @@ pub mod paths;
 pub mod plan;
 pub mod platform;
 pub mod positions;
+pub mod preview;
 pub mod sandbox;
 pub mod scan;
 pub mod shell;

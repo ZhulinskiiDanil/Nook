@@ -187,6 +187,17 @@ impl DesktopView {
 }
 
 impl DesktopView {
+    /// Shows or hides desktop icons — the same switch as View → Show desktop icons.
+    pub fn set_icons_visible(&self, visible: bool) -> Result<()> {
+        let mask = FWF_NOICONS.0 as u32;
+        // SAFETY: plain COM call on our view.
+        unsafe {
+            self.view
+                .SetCurrentFolderFlags(mask, if visible { 0 } else { mask })
+        }
+        .context("SetCurrentFolderFlags")
+    }
+
     /// Turns the view's auto-arrange on or off.
     pub fn set_auto_arrange(&self, on: bool) -> Result<()> {
         let mask = FWF_AUTOARRANGE.0 as u32;

@@ -2,6 +2,7 @@
 //! Heavy work (scan, peek) runs on blocking workers with their own COM apartment.
 
 pub mod desk;
+pub mod tray_icon;
 pub mod ui;
 
 use std::path::PathBuf;
@@ -42,6 +43,8 @@ struct State {
     decisions: tokio::sync::watch::Sender<u64>,
     /// One apply/undo at a time.
     apply_lock: Mutex<()>,
+    /// Tray "Пауза входящих" (the inbox watcher arrives in M6).
+    pause_inbox: std::sync::atomic::AtomicBool,
 }
 
 impl State {
@@ -69,8 +72,24 @@ impl State {
         f(&env)
     }
 
-    fn changed(&self) {
+    /// Plan state changed: wake `wait_for_decision`, refresh tray and preview frame.
+    fn changed(self: &Arc<Self>) {
         self.decisions.send_modify(|n| *n += 1);
+        let st = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("preview".into())
+            .spawn(move || refresh_preview(&st));
+    }
+
+    fn apply_now(self: &Arc<Self>, id: &str) -> Result<StoredPlan, HandlerError> {
+        self.guard_live()?;
+        let _g = self.apply_lock.lock().unwrap();
+        let scan = self.scan()?;
+        let _com = ComApartment::sta()?;
+        let sp = self.with_env(|env| apply::apply(id, &scan, env))?;
+        drop(_g);
+        self.changed();
+        Ok(sp)
     }
 
     fn guard_live(&self) -> Result<(), HandlerError> {
@@ -319,13 +338,7 @@ fn dispatch(state: Arc<State>, method: String, p: Value) -> HandlerFuture {
         }),
         "apply_plan" => blocking(move || {
             let ip: IdParams = req(p)?;
-            state.guard_live()?;
-            let _g = state.apply_lock.lock().unwrap();
-            let scan = state.scan()?;
-            let _com = ComApartment::sta()?;
-            let sp = state.with_env(|env| apply::apply(&ip.id, &scan, env))?;
-            state.changed();
-            Ok(decision_view(&sp))
+            Ok(decision_view(&state.apply_now(&ip.id)?))
         }),
         "undo" => blocking(move || {
             let op: OptIdParams = params(p)?;
@@ -371,12 +384,121 @@ fn dispatch(state: Arc<State>, method: String, p: Value) -> HandlerFuture {
     }
 }
 
+/// Pushes the pending plan to the tray and rebuilds its preview frame (worker thread).
+fn refresh_preview(state: &Arc<State>) {
+    let generation = *state.decisions.borrow();
+    let pending = state
+        .store
+        .pending()
+        .filter(|p| p.sandbox == state.desktops.is_sandbox());
+    let plan_ui = ui::PlanUi {
+        id: pending.as_ref().map(|p| p.id.clone()),
+        summary: pending
+            .as_ref()
+            .map(|p| p.summary.clone())
+            .unwrap_or_default(),
+        previewed: pending.as_ref().is_some_and(|p| p.previewed),
+    };
+    if let Err(e) = state.ui.set_plan(plan_ui) {
+        tracing::warn!("tray update failed: {e:#}");
+    }
+    let Some(sp) = pending else { return };
+    let r = (|| -> Result<()> {
+        let scan = state.scan()?;
+        let view = state.ui.call(crate::preview::frame::view_facts)??;
+        let _com = ComApartment::sta()?;
+        let frame = crate::preview::frame::build(&scan, &sp, &state.config, &view)?;
+        if *state.decisions.borrow() != generation {
+            return Ok(()); // a newer change will build its own frame
+        }
+        state.ui.set_frame(frame)
+    })();
+    if let Err(e) = r {
+        tracing::error!(plan = %sp.id, "preview frame failed: {e:#}");
+    }
+}
+
+fn open_in_shell(path: &std::path::Path) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let _ = std::fs::create_dir_all(if path.extension().is_some() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    });
+    // SAFETY: plain shell call with owned strings.
+    unsafe {
+        ShellExecuteW(
+            None,
+            &windows::core::HSTRING::from("open"),
+            &windows::core::HSTRING::from(path.as_os_str()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// UI events (tray menu, preview keys) handled off the UI thread.
+fn handle_ui_events(state: Arc<State>, rx: std::sync::mpsc::Receiver<ui::UiEvent>) {
+    let _com = ComApartment::sta();
+    for ev in rx {
+        tracing::info!(?ev, "ui event");
+        let r: Result<()> = (|| {
+            match ev {
+                ui::UiEvent::Apply(id) => {
+                    let sp = state
+                        .apply_now(&id)
+                        .map_err(|e| anyhow::anyhow!(e.message))?;
+                    tracing::info!(plan = %id, state = ?sp.state, "applied from preview");
+                }
+                ui::UiEvent::Reject(id) => {
+                    apply::set_state(&id, PlanState::Rejected, &state.store)?;
+                    state.changed();
+                }
+                ui::UiEvent::Previewed(id) => {
+                    let mut sp = state.store.load(&id)?;
+                    sp.previewed = true;
+                    state.store.save(&sp)?;
+                }
+                ui::UiEvent::UndoLast => {
+                    state.guard_live().map_err(|e| anyhow::anyhow!(e.message))?;
+                    let _g = state.apply_lock.lock().unwrap();
+                    state.with_env(|env| apply::undo(None, env))?;
+                    drop(_g);
+                    state.changed();
+                }
+                ui::UiEvent::TogglePauseInbox(on) => {
+                    state
+                        .pause_inbox
+                        .store(on, std::sync::atomic::Ordering::Relaxed);
+                }
+                ui::UiEvent::OpenQuarantine => {
+                    let q = state.with_env(|env| env.quarantine_root())?;
+                    open_in_shell(&q);
+                }
+                ui::UiEvent::OpenConfig => {
+                    open_in_shell(&crate::paths::AppDirs::resolve()?.config_file())
+                }
+                ui::UiEvent::OpenLogs => {
+                    open_in_shell(&crate::paths::AppDirs::resolve()?.logs_dir())
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            tracing::error!("ui event failed: {e:#}");
+        }
+    }
+}
+
 /// Runs the daemon until the user picks "Выход". Call on the main thread.
 pub fn run(config: Config) -> Result<()> {
     let _com = ComApartment::sta()?;
     let desktops = Desktops::resolve()?;
     tracing::info!(sandbox = desktops.is_sandbox(), user = %desktops.user.display(), "desktops");
-    let (ui, bridge) = Ui::create()?;
+    let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+    let (ui, bridge) = Ui::create(config.preview.hold_ms, &config.preview.accent, ev_tx)?;
 
     let data_dir = crate::paths::AppDirs::resolve()?.data_dir;
     let store = Store::new(&data_dir);
@@ -390,7 +512,18 @@ pub fn run(config: Config) -> Result<()> {
         last_scan: Mutex::new(None),
         decisions,
         apply_lock: Mutex::new(()),
+        pause_inbox: std::sync::atomic::AtomicBool::new(false),
     });
+    {
+        let st = state.clone();
+        std::thread::Builder::new()
+            .name("ui-events".into())
+            .spawn(move || handle_ui_events(st, ev_rx))?;
+        let st = state.clone();
+        std::thread::Builder::new()
+            .name("preview".into())
+            .spawn(move || refresh_preview(&st))?;
+    }
     let name = pipe_name()?;
     let sid = current_user_sid()?;
     std::thread::Builder::new()

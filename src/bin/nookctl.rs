@@ -61,6 +61,12 @@ enum Command {
     Mcp,
     /// Apply a pending plan (M4; from M5 the user applies from the preview).
     Apply { plan_id: String },
+    /// Render a plan's preview frame to PNG (debug; the real preview is LCtrl+LAlt).
+    Preview {
+        plan_id: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Undo the last applied plan, or the given one.
     Undo { plan_id: Option<String> },
     /// Applied / undone / failed plans.
@@ -297,6 +303,22 @@ fn main() -> Result<()> {
         Command::Mcp => unreachable!(),
         Command::Apply { plan_id } => ipc("apply_plan", serde_json::json!({ "id": plan_id }))?,
         Command::Undo { plan_id } => ipc("undo", serde_json::json!({ "plan_id": plan_id }))?,
+        Command::Preview { plan_id, out } => {
+            let store = nook::plan::store::Store::new(&dirs.data_dir);
+            let sp = store.load(&plan_id)?;
+            let r = scan(&Desktops::resolve()?)?;
+            let view = nook::preview::frame::view_facts()?;
+            let f = nook::preview::frame::build(&r, &sp, &config, &view)?;
+            f.pixmap.save_png(&out)?;
+            println!(
+                "{}x{} frame in {} ms (live wallpaper: {}) → {}",
+                f.width,
+                f.height,
+                f.build_ms,
+                f.live_wallpaper,
+                out.display()
+            );
+        }
         Command::History { limit } => ipc("history", serde_json::json!({ "limit": limit }))?,
         Command::Quarantine {
             action: QuarantineAction::List,
