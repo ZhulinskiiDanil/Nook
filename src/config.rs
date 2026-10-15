@@ -163,9 +163,23 @@ impl Default for IconsConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeneralConfig {
+    /// Start with Windows (`HKCU\...\Run`).
+    pub autostart: bool,
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self { autostart: true }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub general: GeneralConfig,
     pub layout: LayoutConfig,
     pub preview: PreviewConfig,
     pub inbox: InboxConfig,
@@ -175,6 +189,9 @@ pub struct Config {
 
 /// Text written on first run; mirrors appendix B of the spec.
 pub const DEFAULT_CONFIG_TOML: &str = r##"# Nook config. Missing keys fall back to defaults.
+
+[general]
+autostart = true
 
 [layout]
 margin_cells = 1

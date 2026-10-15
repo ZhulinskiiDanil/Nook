@@ -170,3 +170,22 @@ impl Drop for Key {
         }
     }
 }
+
+/// Sets an HKCU REG_SZ value (creates the key if needed).
+pub fn hkcu_set_string(subkey: &str, value: &str, data: &str) -> anyhow::Result<()> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
+    let w: Vec<u16> = data.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: buffer of w.len()*2 bytes including the terminator.
+    let r = unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(subkey),
+            &HSTRING::from(value),
+            REG_SZ.0,
+            Some(w.as_ptr().cast()),
+            (w.len() * 2) as u32,
+        )
+    };
+    r.ok()
+        .map_err(|e| anyhow::anyhow!("RegSetKeyValueW {value}: {e}"))
+}

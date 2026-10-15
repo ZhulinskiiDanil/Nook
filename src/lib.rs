@@ -8,6 +8,7 @@ pub mod fsutil;
 pub mod icons;
 pub mod intel;
 pub mod ipc;
+pub mod keeper;
 pub mod layout;
 pub mod logging;
 pub mod mcp;

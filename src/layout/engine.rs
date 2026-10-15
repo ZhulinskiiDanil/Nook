@@ -11,17 +11,17 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{Corner, LayoutConfig};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Cell {
     pub col: i32,
     pub row: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Group {
     Apps,
@@ -40,7 +40,7 @@ impl Group {
         }
     }
 
-    fn corner(self, cfg: &LayoutConfig) -> Corner {
+    pub fn corner(self, cfg: &LayoutConfig) -> Corner {
         match self {
             Group::Apps => cfg.corners.apps,
             Group::Projects => cfg.corners.projects,
@@ -99,7 +99,7 @@ impl Taken<'_> {
 /// Cells in fill order for a group, starting at its corner (with margin).
 /// A group stays in its own half of the screen and never jumps over a blocked zone:
 /// a row/column ends at the first blocked cell.
-fn order(group: Group, corner: Corner, cfg: &LayoutConfig, input: &Input) -> Vec<Cell> {
+pub fn order(group: Group, corner: Corner, cfg: &LayoutConfig, input: &Input) -> Vec<Cell> {
     let (cols, rows) = (input.cols, input.rows);
     let m = cfg.margin_cells as i32;
     let left = matches!(corner, Corner::TopLeft | Corner::BottomLeft);

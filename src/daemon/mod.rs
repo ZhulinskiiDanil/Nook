@@ -2,6 +2,7 @@
 //! Heavy work (scan, peek) runs on blocking workers with their own COM apartment.
 
 pub mod desk;
+mod keeper_svc;
 pub mod tray_icon;
 pub mod ui;
 
@@ -43,8 +44,12 @@ struct State {
     decisions: tokio::sync::watch::Sender<u64>,
     /// One apply/undo at a time.
     apply_lock: Mutex<()>,
-    /// Tray "Пауза входящих" (the inbox watcher arrives in M6).
+    /// Tray "Пауза входящих".
     pause_inbox: std::sync::atomic::AtomicBool,
+    /// A plan is being applied: its own file moves are not inbox arrivals.
+    applying: std::sync::atomic::AtomicBool,
+    /// Layout the keeper holds (state.json).
+    keeper: Mutex<crate::keeper::KeeperState>,
 }
 
 impl State {
@@ -83,12 +88,37 @@ impl State {
     }
 
     fn apply_now(self: &Arc<Self>, id: &str) -> Result<StoredPlan, HandlerError> {
+        use std::sync::atomic::Ordering;
         self.guard_live()?;
         let _g = self.apply_lock.lock().unwrap();
         let scan = self.scan()?;
         let _com = ComApartment::sta()?;
-        let sp = self.with_env(|env| apply::apply(id, &scan, env))?;
+        self.applying.store(true, Ordering::Relaxed);
+        let sp = self.with_env(|env| apply::apply(id, &scan, env));
         drop(_g);
+        // Let the watcher drain the plan's own file events before arrivals count again.
+        let st = self.clone();
+        let _ = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            st.applying.store(false, Ordering::Relaxed);
+        });
+        let sp = sp?;
+        if sp.state == PlanState::Applied
+            && let Err(e) = keeper_svc::remember_applied(self, &sp.plan)
+        {
+            tracing::warn!("keeper: could not record the layout: {e:#}");
+        }
+        self.changed();
+        Ok(sp)
+    }
+
+    fn undo_now(self: &Arc<Self>, id: Option<&str>) -> Result<StoredPlan, HandlerError> {
+        self.guard_live()?;
+        let _g = self.apply_lock.lock().unwrap();
+        let _com = ComApartment::sta()?;
+        let sp = self.with_env(|env| apply::undo(id, env))?;
+        drop(_g);
+        keeper_svc::forget(self);
         self.changed();
         Ok(sp)
     }
@@ -343,12 +373,7 @@ fn dispatch(state: Arc<State>, method: String, p: Value) -> HandlerFuture {
         }),
         "undo" => blocking(move || {
             let op: OptIdParams = params(p)?;
-            state.guard_live()?;
-            let _g = state.apply_lock.lock().unwrap();
-            let _com = ComApartment::sta()?;
-            let sp = state.with_env(|env| apply::undo(op.plan_id.as_deref(), env))?;
-            state.changed();
-            Ok(decision_view(&sp))
+            Ok(decision_view(&state.undo_now(op.plan_id.as_deref())?))
         }),
         "history" => blocking(move || {
             let hp: HistoryParams = params(p)?;
@@ -440,6 +465,32 @@ fn open_in_shell(path: &std::path::Path) {
     }
 }
 
+/// `HKCU\...\Run\Nook` → this exe (spec §4.1). Removed only if it points at Nook.
+fn autostart(on: bool) {
+    const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let value = format!("\"{}\"", exe.display());
+    let key = crate::winreg::Key::open(windows::Win32::System::Registry::HKEY_CURRENT_USER, RUN);
+    let current = key.as_ref().and_then(|k| k.string("", "Nook"));
+    let r = if on {
+        if current.as_deref() == Some(value.as_str()) {
+            Ok(())
+        } else {
+            crate::winreg::hkcu_set_string(RUN, "Nook", &value)
+        }
+    } else if current.is_some_and(|c| c.to_lowercase().contains("nook")) {
+        crate::winreg::hkcu_remove_value(RUN, "Nook")
+    } else {
+        Ok(())
+    };
+    match r {
+        Ok(()) => tracing::info!(on, "autostart"),
+        Err(e) => tracing::warn!("autostart: {e:#}"),
+    }
+}
+
 /// UI events (tray menu, preview keys) handled off the UI thread.
 fn handle_ui_events(state: Arc<State>, rx: std::sync::mpsc::Receiver<ui::UiEvent>) {
     let _com = ComApartment::sta();
@@ -463,11 +514,18 @@ fn handle_ui_events(state: Arc<State>, rx: std::sync::mpsc::Receiver<ui::UiEvent
                     state.store.save(&sp)?;
                 }
                 ui::UiEvent::UndoLast => {
-                    state.guard_live().map_err(|e| anyhow::anyhow!(e.message))?;
-                    let _g = state.apply_lock.lock().unwrap();
-                    state.with_env(|env| apply::undo(None, env))?;
-                    drop(_g);
-                    state.changed();
+                    state
+                        .undo_now(None)
+                        .map_err(|e| anyhow::anyhow!(e.message))?;
+                }
+                ui::UiEvent::DisplayChanged => {
+                    // Let Explorer settle on the new grid first.
+                    std::thread::sleep(Duration::from_millis(1500));
+                    keeper_svc::relayout(&state)?;
+                }
+                ui::UiEvent::ExplorerRestarted => {
+                    std::thread::sleep(Duration::from_secs(4));
+                    keeper_svc::check(&state)?;
                 }
                 ui::UiEvent::TogglePauseInbox(on) => {
                     state
@@ -514,7 +572,17 @@ pub fn run(config: Config) -> Result<()> {
         decisions,
         apply_lock: Mutex::new(()),
         pause_inbox: std::sync::atomic::AtomicBool::new(false),
+        applying: std::sync::atomic::AtomicBool::new(false),
+        keeper: Mutex::new(crate::keeper::KeeperState::default()),
     });
+    *state.keeper.lock().unwrap() = crate::keeper::load(&keeper_svc::state_file(&state));
+    if let Err(e) = keeper_svc::spawn_inbox(state.clone()) {
+        tracing::error!("inbox watcher failed to start: {e:#}");
+    }
+    keeper_svc::spawn_keeper(state.clone());
+    if !state.desktops.is_sandbox() {
+        autostart(state.config.general.autostart);
+    }
     {
         let st = state.clone();
         std::thread::Builder::new()

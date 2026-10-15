@@ -23,13 +23,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
     DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, HC_ACTION, HHOOK, HICON,
     HWND_TOPMOST, KBDLLHOOKSTRUCT, KillTimer, LLKHF_INJECTED, MF_CHECKED, MF_SEPARATOR, MF_STRING,
-    MSG, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_HIDE,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetTimer,
-    SetWindowPos, SetWindowsHookExW, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, TranslateMessage, ULW_ALPHA, UnhookWindowsHookEx, UpdateLayeredWindow,
-    WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_KEYDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP,
+    MSG, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SPI_SETWORKAREA,
+    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+    SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, ULW_ALPHA, UnhookWindowsHookEx,
+    UpdateLayeredWindow, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KEYDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSKEYDOWN,
+    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP,
 };
 use windows::core::w;
 
@@ -61,6 +62,10 @@ pub enum UiEvent {
     OpenQuarantine,
     OpenConfig,
     OpenLogs,
+    /// Resolution, monitor layout, DPI or work area changed.
+    DisplayChanged,
+    /// Explorer came back (TaskbarCreated).
+    ExplorerRestarted,
 }
 
 /// Pending plan as the UI sees it.
@@ -602,7 +607,20 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         }
         m if m != 0 && TASKBAR_CREATED.get() == m => {
             tracing::info!("Explorer restarted; re-adding tray icon");
-            with_state(|s| tray(s, NIM_ADD));
+            with_state(|s| {
+                tray(s, NIM_ADD);
+                let _ = s.events.send(UiEvent::ExplorerRestarted);
+            });
+            LRESULT(0)
+        }
+        WM_DISPLAYCHANGE | WM_DPICHANGED => {
+            with_state(|s| s.events.send(UiEvent::DisplayChanged).ok());
+            // SAFETY: default handling.
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+        }
+        WM_SETTINGCHANGE if wp.0 as u32 == SPI_SETWORKAREA.0 => {
+            // Taskbar moved/resized: the work area (and grid) changed.
+            with_state(|s| s.events.send(UiEvent::DisplayChanged).ok());
             LRESULT(0)
         }
         // SAFETY: default handling.
