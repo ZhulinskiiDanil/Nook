@@ -41,8 +41,18 @@ impl Default for Corners {
 pub struct LayoutConfig {
     pub margin_cells: u32,
     pub apps_columns: u32,
-    pub busy_threshold: f32,
+    /// Areas the layout never fills, as fractions of the work area.
+    pub keep_free: Vec<Zone>,
     pub corners: Corners,
+}
+
+/// Rectangle in fractions (0..=1) of the work area.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Zone {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 impl Default for LayoutConfig {
@@ -50,7 +60,12 @@ impl Default for LayoutConfig {
         Self {
             margin_cells: 1,
             apps_columns: 2,
-            busy_threshold: 0.35,
+            keep_free: vec![Zone {
+                x: 0.25,
+                y: 0.0,
+                w: 0.5,
+                h: 1.0,
+            }],
             corners: Corners::default(),
         }
     }
@@ -127,7 +142,8 @@ pub const DEFAULT_CONFIG_TOML: &str = r##"# Nook config. Missing keys fall back 
 [layout]
 margin_cells = 1
 apps_columns = 2
-busy_threshold = 0.35
+# Areas never filled, as fractions of the work area (default: center column, full height).
+keep_free = [{ x = 0.25, y = 0.0, w = 0.5, h = 1.0 }]
 corners = { apps = "top-left", projects = "top-right", inbox = "bottom-right", trash = "bottom-left" }
 
 [preview]
