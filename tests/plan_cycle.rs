@@ -242,7 +242,11 @@ fn icon_styles_apply_and_undo_exactly() {
 
     let steam_id = sb.id(&s, "Steam.url");
     apply::undo(None, &sb.env()).unwrap();
-    assert_eq!(sb.id(&sb.scan(), "Steam.url"), steam_id, "undo must keep the file identity (FileId)");
+    assert_eq!(
+        sb.id(&sb.scan(), "Steam.url"),
+        steam_id,
+        "undo must keep the file identity (FileId)"
+    );
     assert_eq!(sb.state(), before);
 }
 

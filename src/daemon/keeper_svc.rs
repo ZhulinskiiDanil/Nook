@@ -151,6 +151,21 @@ pub(super) fn remember_applied(
             });
         }
     }
+    // Anything on the desktop the plan didn't mention (arrived later) belongs to the inbox,
+    // so relayouts never hand its cell to someone else.
+    let known: HashSet<String> = kept.iter().map(|k| k.key.clone()).collect();
+    for v in &s.items {
+        let key = v.parsing.to_lowercase();
+        if !known.contains(&key) {
+            kept.push(Kept {
+                id: None,
+                key,
+                group: Group::Inbox,
+                cell: s.cell(v),
+                pinned: false,
+            });
+        }
+    }
     let ks = KeeperState {
         items: kept,
         grid: Some(s.grid()),
