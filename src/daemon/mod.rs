@@ -95,6 +95,7 @@ fn dispatch(state: Arc<State>, method: String, p: Value) -> HandlerFuture {
             Ok(json!({
                 "sandbox": r.sandbox,
                 "total": r.total,
+                "summary": summary(&r),
                 "offset": offset,
                 "returned": page.len(),
                 "grid": r.grid,
@@ -167,4 +168,44 @@ pub fn run(config: Config) -> Result<()> {
     ui.run();
     tracing::info!("message loop ended");
     Ok(())
+}
+
+/// Counts Claude should quote instead of recounting.
+fn summary(r: &ScanResult) -> Value {
+    use std::collections::BTreeSet;
+
+    use crate::scan::{Item, Kind, Source};
+    let count = |f: &dyn Fn(&Item) -> bool| r.items.iter().filter(|i| f(i)).count();
+    let dup_groups: BTreeSet<Vec<&str>> = r
+        .items
+        .iter()
+        .filter(|i| !i.hints.duplicate_of.is_empty())
+        .map(|i| {
+            let mut g: Vec<&str> = std::iter::once(i.id.as_str())
+                .chain(i.hints.duplicate_of.iter().map(String::as_str))
+                .collect();
+            g.sort_unstable();
+            g
+        })
+        .collect();
+    json!({
+        "total": r.total,
+        "by_source": {
+            "user": count(&|i| i.source == Source::User),
+            "public": count(&|i| i.source == Source::Public),
+            "virtual": count(&|i| i.source == Source::Virtual),
+        },
+        "by_kind": {
+            "shortcut": count(&|i| matches!(i.kind, Kind::Shortcut | Kind::Url)),
+            "folder": count(&|i| i.kind == Kind::Folder),
+            "file": count(&|i| i.kind == Kind::File),
+            "virtual": count(&|i| i.kind == Kind::Virtual),
+        },
+        "layout_only": count(&|i| !i.writable),
+        "exact_duplicate_groups": dup_groups.len(),
+        "name_looks_like_copy": count(&|i| i.hints.is_copy),
+        "broken_shortcuts": count(&|i| i.shortcut.as_ref().is_some_and(|s| s.target_exists == Some(false))),
+        "pinned_to_taskbar": count(&|i| i.shortcut.as_ref().is_some_and(|s| s.pinned_to_taskbar)),
+        "launch_data_available": r.items.iter().any(|i| i.shortcut.as_ref().is_some_and(|s| s.launch_count.is_some())),
+    })
 }

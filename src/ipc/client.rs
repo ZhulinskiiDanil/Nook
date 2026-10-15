@@ -29,6 +29,22 @@ fn spawn_daemon() -> Result<()> {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     let exe = daemon_exe()?;
+    // Our stdio may be Claude Code's MCP pipes. If the long-lived daemon inherited them,
+    // the client would never see EOF after we exit. Make them non-inheritable first.
+    // SAFETY: only flips the inherit flag on our own std handles.
+    unsafe {
+        use windows::Win32::Foundation::{HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation};
+        use windows::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            if let Ok(h) = GetStdHandle(which)
+                && !h.is_invalid()
+            {
+                let _ = SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
+            }
+        }
+    }
     if !exe.is_file() {
         bail!("daemon not running and {} not found", exe.display());
     }

@@ -92,7 +92,7 @@ impl NookMcp {
     }
 
     #[tool(
-        description = "All desktop items (user Desktop, Public Desktop, virtual) with id, kind, cell, shortcut target/pins/launches, folder summary and hints (duplicates by hash, copies, backups, installers, temp files, age). Paged: default up to 200."
+        description = "All desktop items (user Desktop, Public Desktop, virtual) with id, kind, cell, shortcut target/pins/launches, folder summary and hints. Paged: default up to 200. Use `summary` for counts, do not recount by hand. Semantics: `duplicate_of` = byte-identical content (same blake3 hash); `is_copy` = only the NAME looks like a copy (content may differ — not a duplicate); `writable: false` = layout only (position on the desktop), Nook cannot move, rename or quarantine it (Public Desktop, virtual items); `launch_count`/`last_launch` absent = no data (tracking may be off), not \"never used\"; Nook does not know Recycle Bin contents."
     )]
     async fn scan(&self, Parameters(a): Parameters<ScanArgs>) -> Result<CallToolResult, ErrorData> {
         self.json_tool("scan", json!({ "offset": a.offset, "limit": a.limit }))
