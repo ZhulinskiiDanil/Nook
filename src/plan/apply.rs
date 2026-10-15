@@ -652,6 +652,22 @@ fn execute(
     for d in touched_dirs {
         notify_dir(&d);
     }
+    // New icons only show once Explorer's icon cache lets go of the old pictures.
+    let icon_paths: Vec<PathBuf> = sp
+        .plan
+        .actions
+        .iter()
+        .filter(|a| {
+            matches!(
+                a,
+                Action::RestyleIcon { .. } | Action::FolderIcon { .. } | Action::Dim { .. }
+            )
+        })
+        .filter_map(|a| cur.get(a.item()?).cloned())
+        .collect();
+    if !icon_paths.is_empty() && env.desk.live() {
+        crate::plan::fsops::refresh_icons(&icon_paths);
+    }
     Ok(())
 }
 
@@ -868,14 +884,25 @@ fn rollback(id: &str, env: &Env) -> Result<usize> {
     let (pos, rest): (Vec<_>, Vec<_>) = journal::done_steps(&lines)
         .into_iter()
         .partition(|(_, s)| matches!(s, Step::Positions { .. }));
+    let mut icon_paths = Vec::new();
     for (seq, step) in rest.into_iter().chain(pos) {
         match revert(&step, env) {
             Ok(note) => {
+                match &step {
+                    Step::ModifyFile { path, .. } => icon_paths.push(path.clone()),
+                    Step::WriteFile { path, .. } => {
+                        icon_paths.extend(path.parent().map(Path::to_path_buf))
+                    }
+                    _ => {}
+                }
                 j.close(seq, Mark::Undone, &step, note)?;
                 n += 1;
             }
             Err(e) => errors.push(format!("step {seq}: {e:#}")),
         }
+    }
+    if !icon_paths.is_empty() && !env.desktops.is_sandbox() {
+        crate::plan::fsops::refresh_icons(&icon_paths);
     }
     if errors.is_empty() {
         Ok(n)

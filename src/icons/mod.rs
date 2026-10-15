@@ -297,7 +297,13 @@ pub fn base_icon(parsing: &str) -> Result<Pixmap> {
     let mut rgba = crate::shell::thumbs::shell_icon_rgba(parsing, 256)?;
     // Apps without a 256 px icon come back as a tiny icon framed in a 256 tile. Then the
     // honest 48 px version is the better source (desktop icons are 32–48 px anyway).
-    let opaque = rgba.pixels.as_chunks::<4>().0.iter().filter(|p| p[3] > 128).count();
+    let opaque = rgba
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[3] > 128)
+        .count();
     if (opaque as f32) < (rgba.width * rgba.height) as f32 * 0.06
         && let Ok(small) = crate::shell::thumbs::shell_icon_rgba(parsing, 48)
     {

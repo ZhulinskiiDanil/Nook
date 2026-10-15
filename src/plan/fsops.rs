@@ -127,6 +127,31 @@ pub fn notify_item(path: &Path) {
     };
 }
 
+/// After icons changed (desktop.ini / .lnk / .url): Explorer keeps showing cached pictures
+/// until its icon cache is refreshed. `ie4uinit -show` is the stock way to do that; then
+/// re-touch the changed files so the view re-reads them (`.url` icons are cached separately).
+pub fn refresh_icons(changed: &[std::path::PathBuf]) {
+    let sys = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let _ = std::process::Command::new(format!(r"{sys}\System32\ie4uinit.exe"))
+        .arg("-show")
+        .status();
+    for p in changed {
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(p) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+        notify_item(p);
+    }
+    // SAFETY: plain call; tells the shell file associations/icons changed.
+    unsafe {
+        windows::Win32::UI::Shell::SHChangeNotify(
+            windows::Win32::UI::Shell::SHCNE_ASSOCCHANGED,
+            windows::Win32::UI::Shell::SHCNF_IDLIST,
+            None,
+            None,
+        )
+    };
+}
+
 pub fn notify_dir(path: &Path) {
     let w = HSTRING::from(path.as_os_str());
     // SAFETY: as above.
