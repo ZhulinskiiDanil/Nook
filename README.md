@@ -21,6 +21,9 @@ Spec: [TASK.md](TASK.md) · wireframe: [docs/wireframe.svg](docs/wireframe.svg)
 cargo build --release
 target\release\nookctl.exe doctor          # read-only environment report
 target\release\nookctl.exe doctor --json
+target\release\nookctl.exe dump [--json]          # all desktop items with hints (read-only)
+target\release\nookctl.exe peek <id|name>         # thumbnail, text head, listing, PE info
+target\release\nookctl.exe sandbox init --root C:\nook-sandbox
 ```
 
 Development sandbox: set `NOOK_DESKTOP_ROOT=C:\nook-sandbox` — Nook then works on
