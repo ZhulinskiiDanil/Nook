@@ -127,6 +127,42 @@ impl Default for SafetyConfig {
     }
 }
 
+/// Nook icon styles (spec §5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IconStyle {
+    /// Rounded square in the icon's own (darkened) color.
+    Tile,
+    /// Round glass.
+    Orb,
+    /// Accent-tinted grayscale (inactive items).
+    Muted,
+    /// Keep the stock icon.
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IconsConfig {
+    pub enabled: bool,
+    pub apps: IconStyle,
+    pub projects: IconStyle,
+    pub dim: IconStyle,
+    pub accent: String,
+}
+
+impl Default for IconsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            apps: IconStyle::Tile,
+            projects: IconStyle::Orb,
+            dim: IconStyle::Muted,
+            accent: "#8fb3ff".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -134,6 +170,7 @@ pub struct Config {
     pub preview: PreviewConfig,
     pub inbox: InboxConfig,
     pub safety: SafetyConfig,
+    pub icons: IconsConfig,
 }
 
 /// Text written on first run; mirrors appendix B of the spec.
@@ -160,6 +197,13 @@ ignore = ["*.tmp", "*.crdownload", "*.part", "~$*", "desktop.ini"]
 allowed_roots = ["%DESKTOP%"]
 quarantine_dir = "%USERPROFILE%\\.nook\\quarantine"
 allow_ai_apply = false
+
+[icons]
+enabled = true
+apps = "tile"        # tile | orb | muted | none
+projects = "orb"
+dim = "muted"
+accent = "#8fb3ff"   # background of muted icons
 "##;
 
 impl Config {
