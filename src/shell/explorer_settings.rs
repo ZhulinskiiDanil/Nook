@@ -57,6 +57,11 @@ impl ExplorerSettings {
     }
 }
 
+/// Windows "Track app launches" (privacy setting). Missing value means enabled.
+pub fn launch_tracking_enabled() -> bool {
+    hkcu_dword(ADVANCED, "Start_TrackProgs") != Some(0)
+}
+
 /// Virtual desktop icons Nook knows about.
 pub const VIRTUAL_ICONS: &[(&str, &str, bool)] = &[
     // (name, CLSID, shown by default)

@@ -38,7 +38,7 @@ pub const INSTRUCTIONS: &str =
 pub struct ScanArgs {
     /// Index of the first item to return (default 0).
     pub offset: Option<usize>,
-    /// Max items to return (default 200).
+    /// Max items to return (default 200, max 1000). 0 = summary only, no items.
     pub limit: Option<usize>,
 }
 
@@ -92,7 +92,7 @@ impl NookMcp {
     }
 
     #[tool(
-        description = "All desktop items (user Desktop, Public Desktop, virtual) with id, kind, cell, shortcut target/pins/launches, folder summary and hints. Paged: default up to 200. Use `summary` for counts, do not recount by hand. Semantics: `duplicate_of` = byte-identical content (same blake3 hash); `is_copy` = only the NAME looks like a copy (content may differ — not a duplicate); `writable: false` = layout only (position on the desktop), Nook cannot move, rename or quarantine it (Public Desktop, virtual items); `launch_count`/`last_launch` absent = no data (tracking may be off), not \"never used\"; Nook does not know Recycle Bin contents."
+        description = "All desktop items (user Desktop, Public Desktop, virtual) with id, kind, cell, shortcut target/pins/launches, folder summary and hints. Paged: default up to 200. Call with no limit to get every item; `limit: 0` returns only `summary`. Use `summary` for counts, do not recount by hand. Semantics: `duplicate_of` = byte-identical content (same blake3 hash); `is_copy` = only the NAME looks like a copy (content may differ — not a duplicate); `writable: false` = layout only (position on the desktop), Nook cannot move, rename or quarantine it (Public Desktop, virtual items); `launch_count`/`last_launch` absent = no data (tracking may be off), not \"never used\"; Nook does not know Recycle Bin contents."
     )]
     async fn scan(&self, Parameters(a): Parameters<ScanArgs>) -> Result<CallToolResult, ErrorData> {
         self.json_tool("scan", json!({ "offset": a.offset, "limit": a.limit }))

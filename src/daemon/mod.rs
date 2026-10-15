@@ -90,7 +90,7 @@ fn dispatch(state: Arc<State>, method: String, p: Value) -> HandlerFuture {
             let sp: ScanParams = params(p)?;
             let r = state.scan()?;
             let offset = sp.offset.unwrap_or(0);
-            let limit = sp.limit.unwrap_or(SCAN_DEFAULT_LIMIT).clamp(1, 1000);
+            let limit = sp.limit.unwrap_or(SCAN_DEFAULT_LIMIT).min(1000);
             let page: Vec<_> = r.items.iter().skip(offset).take(limit).collect();
             Ok(json!({
                 "sandbox": r.sandbox,
@@ -206,6 +206,8 @@ fn summary(r: &ScanResult) -> Value {
         "name_looks_like_copy": count(&|i| i.hints.is_copy),
         "broken_shortcuts": count(&|i| i.shortcut.as_ref().is_some_and(|s| s.target_exists == Some(false))),
         "pinned_to_taskbar": count(&|i| i.shortcut.as_ref().is_some_and(|s| s.pinned_to_taskbar)),
-        "launch_data_available": r.items.iter().any(|i| i.shortcut.as_ref().is_some_and(|s| s.launch_count.is_some())),
+        // Start_TrackProgs = 0 disables UserAssist; old entries may still exist.
+        "launch_tracking_enabled": crate::shell::explorer_settings::launch_tracking_enabled(),
+        "items_with_launch_data": count(&|i| i.shortcut.as_ref().is_some_and(|s| s.launch_count.is_some())),
     })
 }
