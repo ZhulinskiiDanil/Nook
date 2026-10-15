@@ -59,6 +59,20 @@ enum Command {
     },
     /// stdio MCP server for Claude Code (proxies to the daemon, starting it if needed).
     Mcp,
+    /// Apply a pending plan (M4; from M5 the user applies from the preview).
+    Apply { plan_id: String },
+    /// Undo the last applied plan, or the given one.
+    Undo { plan_id: Option<String> },
+    /// Applied / undone / failed plans.
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Quarantine: list or restore.
+    Quarantine {
+        #[command(subcommand)]
+        action: QuarantineAction,
+    },
     /// Call a daemon IPC method directly, e.g. `call status` or `call scan {"limit":5}`.
     Call {
         method: String,
@@ -70,6 +84,25 @@ enum Command {
         #[command(subcommand)]
         action: SandboxAction,
     },
+}
+
+#[derive(Subcommand)]
+enum QuarantineAction {
+    List,
+    Restore { ids: Vec<String> },
+}
+
+/// One IPC call to the daemon (starting it if needed); prints pretty JSON.
+fn ipc(method: &str, params: serde_json::Value) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let v = rt.block_on(async {
+        let mut c = nook::ipc::client::Client::connect_or_start().await?;
+        c.call(method, params).await
+    })?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -256,12 +289,21 @@ fn main() -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let r = rt.block_on(nook::mcp::serve_stdio());
+        let r = rt.block_on(nook::mcp::serve_stdio(config.safety.allow_ai_apply));
         tracing::info!("mcp server stopped: {r:?}");
         return r;
     }
     match cli.command {
         Command::Mcp => unreachable!(),
+        Command::Apply { plan_id } => ipc("apply_plan", serde_json::json!({ "id": plan_id }))?,
+        Command::Undo { plan_id } => ipc("undo", serde_json::json!({ "plan_id": plan_id }))?,
+        Command::History { limit } => ipc("history", serde_json::json!({ "limit": limit }))?,
+        Command::Quarantine {
+            action: QuarantineAction::List,
+        } => ipc("quarantine_list", serde_json::Value::Null)?,
+        Command::Quarantine {
+            action: QuarantineAction::Restore { ids },
+        } => ipc("quarantine_restore", serde_json::json!({ "ids": ids }))?,
         Command::Call { method, params } => {
             let params: serde_json::Value = match params {
                 Some(p) => serde_json::from_str(&p).context("params must be JSON")?,

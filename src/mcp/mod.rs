@@ -49,12 +49,61 @@ pub struct PeekArgs {
     pub id: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProposeArgs {
+    /// The plan: title, layout groups (apps/projects/inbox/trash) and whitelisted actions.
+    pub plan: crate::plan::model::PlanInput,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlanIdArgs {
+    /// Plan id from `propose_plan`, e.g. "pl_x2k9m4qa".
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WaitArgs {
+    pub id: String,
+    /// Seconds to wait (default 60, max 300). On timeout the answer is `still_pending`.
+    pub timeout_s: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct UndoArgs {
+    /// Plan to undo; default: the last applied one.
+    pub plan_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct HistoryArgs {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RestoreArgs {
+    /// Quarantine entry ids from `quarantine_list`.
+    pub ids: Vec<String>,
+}
+
+#[derive(Clone)]
 pub struct NookMcp {
     client: Arc<Mutex<Option<Client>>>,
+    tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 impl NookMcp {
+    /// `apply_plan` is exposed only when `safety.allow_ai_apply = true` (spec §8).
+    pub fn new(allow_ai_apply: bool) -> Self {
+        let mut tool_router = Self::tool_router();
+        if !allow_ai_apply {
+            tool_router.remove_route("apply_plan");
+        }
+        Self {
+            client: Arc::default(),
+            tool_router,
+        }
+    }
+
     /// Calls the daemon; reconnects (and starts it) once if the pipe broke.
     async fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
         let mut guard = self.client.lock().await;
@@ -127,9 +176,97 @@ impl NookMcp {
         }
         Ok(CallToolResult::success(content))
     }
+
+    #[tool(
+        description = "Validate a plan and make it pending (replaces any pending plan). Every desktop item must end up in exactly one place: a layout group (apps ↖, projects ↗, inbox ↘, trash ↙) or off the desktop (move_to_folder / quarantine). Protected OS files (desktop.ini) are exempt — hide them with explorer_setting hide_protected_os_files. Layout entries: item id, `new:%DESKTOP%\\\\Name` for a folder the plan creates, or {item, pin:{col,row}}. Actions (each needs a non-empty reason): move_to_folder{item,dest,create_dirs}, quarantine{item}, rename{item,new_name}, hide_caption{item} (.lnk/.url only), dim{item,value}, folder_icon{item,icon:\"default\"|path}, explorer_setting{key: hide_protected_os_files|auto_arrange_off|hide_this_pc_icon, value}. Items with writable:false allow layout only. Returns plan_id and summary \"before → after\", or a list of errors."
+    )]
+    async fn propose_plan(
+        &self,
+        Parameters(a): Parameters<ProposeArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let plan = serde_json::to_value(&a.plan).unwrap_or_default();
+        self.json_tool("propose_plan", json!({ "plan": plan }))
+            .await
+    }
+
+    #[tool(
+        description = "A plan with its state (pending, applied, rejected, superseded, failed, cancelled, undone) and per-action results."
+    )]
+    async fn get_plan(
+        &self,
+        Parameters(a): Parameters<PlanIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.json_tool("get_plan", json!({ "id": a.id })).await
+    }
+
+    #[tool(
+        description = "Wait until the user applies (double LCtrl+LAlt / Enter in preview) or rejects (Esc) the plan. Default 60 s, max 300. Returns decision: applied | rejected | superseded | failed | cancelled | still_pending."
+    )]
+    async fn wait_for_decision(
+        &self,
+        Parameters(a): Parameters<WaitArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.json_tool(
+            "wait_for_decision",
+            json!({ "id": a.id, "timeout_s": a.timeout_s }),
+        )
+        .await
+    }
+
+    #[tool(description = "Withdraw a pending plan.")]
+    async fn cancel_plan(
+        &self,
+        Parameters(a): Parameters<PlanIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.json_tool("cancel_plan", json!({ "id": a.id })).await
+    }
+
+    #[tool(
+        description = "Undo the last applied plan (or the given one): files, names, attributes, desktop.ini, Explorer settings and icon positions go back. Nothing is deleted."
+    )]
+    async fn undo(&self, Parameters(a): Parameters<UndoArgs>) -> Result<CallToolResult, ErrorData> {
+        self.json_tool("undo", json!({ "plan_id": a.plan_id }))
+            .await
+    }
+
+    #[tool(description = "Applied / undone / failed plans with summaries, newest first.")]
+    async fn history(
+        &self,
+        Parameters(a): Parameters<HistoryArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.json_tool("history", json!({ "limit": a.limit })).await
+    }
+
+    #[tool(
+        description = "What sits in quarantine: name, original path, size, reason, plan. Only the user can empty quarantine."
+    )]
+    async fn quarantine_list(&self) -> Result<CallToolResult, ErrorData> {
+        self.json_tool("quarantine_list", Value::Null).await
+    }
+
+    #[tool(
+        description = "Move quarantined items back to where they were (name conflicts get \" (2)\")."
+    )]
+    async fn quarantine_restore(
+        &self,
+        Parameters(a): Parameters<RestoreArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.json_tool("quarantine_restore", json!({ "ids": a.ids }))
+            .await
+    }
+
+    #[tool(
+        description = "Apply a pending plan without the user's preview. Present only when allow_ai_apply = true."
+    )]
+    async fn apply_plan(
+        &self,
+        Parameters(a): Parameters<PlanIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.json_tool("apply_plan", json!({ "id": a.id })).await
+    }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for NookMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
@@ -139,8 +276,10 @@ impl ServerHandler for NookMcp {
 }
 
 /// Serves MCP over stdio until the client disconnects.
-pub async fn serve_stdio() -> anyhow::Result<()> {
-    let service = NookMcp::default().serve(rmcp::transport::stdio()).await?;
+pub async fn serve_stdio(allow_ai_apply: bool) -> anyhow::Result<()> {
+    let service = NookMcp::new(allow_ai_apply)
+        .serve(rmcp::transport::stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }

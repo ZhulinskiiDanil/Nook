@@ -186,6 +186,19 @@ impl DesktopView {
     }
 }
 
+impl DesktopView {
+    /// Turns the view's auto-arrange on or off.
+    pub fn set_auto_arrange(&self, on: bool) -> Result<()> {
+        let mask = FWF_AUTOARRANGE.0 as u32;
+        // SAFETY: plain COM call on our view.
+        unsafe {
+            self.view
+                .SetCurrentFolderFlags(mask, if on { mask } else { 0 })
+        }
+        .context("SetCurrentFolderFlags")
+    }
+}
+
 /// Grid origin offset: the most common `x mod step` / `y mod step` among current items.
 pub fn grid_origin(items: &[ViewItem], step_x: i32, step_y: i32) -> (i32, i32) {
     fn mode(vals: impl Iterator<Item = i32>) -> i32 {

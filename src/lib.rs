@@ -11,6 +11,7 @@ pub mod layout;
 pub mod logging;
 pub mod mcp;
 pub mod paths;
+pub mod plan;
 pub mod platform;
 pub mod positions;
 pub mod sandbox;

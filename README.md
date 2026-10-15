@@ -11,7 +11,7 @@ Spec: [TASK.md](TASK.md) · wireframe: [docs/wireframe.svg](docs/wireframe.svg)
 - [x] M1 — scan & peek (read-only), `dump`, `sandbox init`
 - [x] M2 — daemon (tray, IPC) & MCP: `status`, `scan`, `peek` (read-only)
 - [x] M3 — layout: keep_free zones, engine, `layout --dry-run|--apply`, `positions save|restore|diff`
-- [ ] M4 — plans, journal, quarantine, undo
+- [x] M4 — plans: validation, all actions, write-ahead journal, quarantine, undo (sandbox; live file ops locked)
 - [ ] M5 — preview & hotkeys
 - [ ] M6 — inbox, keeper, folder icons
 

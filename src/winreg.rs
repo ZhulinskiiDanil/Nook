@@ -100,6 +100,68 @@ impl Key {
     }
 }
 
+/// Sets an HKCU DWORD (creates the key if needed).
+pub fn hkcu_set_dword(subkey: &str, value: &str, data: u32) -> anyhow::Result<()> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, RegSetKeyValueW};
+    // SAFETY: 4-byte buffer.
+    let r = unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(subkey),
+            &HSTRING::from(value),
+            REG_DWORD.0,
+            Some((&data as *const u32).cast()),
+            4,
+        )
+    };
+    r.ok()
+        .map_err(|e| anyhow::anyhow!("RegSetKeyValueW {subkey}\\{value}: {e}"))
+}
+
+/// Removes an HKCU value that Nook itself created (restoring "not set").
+pub fn hkcu_remove_value(subkey: &str, value: &str) -> anyhow::Result<()> {
+    use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteKeyValueW};
+    // SAFETY: plain call.
+    let r = unsafe {
+        RegDeleteKeyValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(subkey),
+            &HSTRING::from(value),
+        )
+    };
+    if r.is_ok() || r == ERROR_FILE_NOT_FOUND {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "RegDeleteKeyValueW {subkey}\\{value}: {r:?}"
+        ))
+    }
+}
+
+/// Broadcasts `WM_SETTINGCHANGE("ShellState")` and `SHCNE_ASSOCCHANGED` so Explorer re-reads settings.
+pub fn broadcast_shell_settings() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+    };
+    let s = HSTRING::from("ShellState");
+    // SAFETY: broadcast with a valid string pointer; bounded by the timeout.
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            WPARAM(0),
+            LPARAM(s.as_ptr() as isize),
+            SMTO_ABORTIFHUNG,
+            1000,
+            None,
+        );
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+    }
+}
+
 impl Drop for Key {
     fn drop(&mut self) {
         // SAFETY: we own the handle.

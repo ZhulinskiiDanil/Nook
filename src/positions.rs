@@ -82,6 +82,13 @@ pub fn save(data_dir: &Path, snap: &Snapshot) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Writes a snapshot under its own name without touching `latest.json` (used by plans).
+pub fn save_as(data_dir: &Path, file_name: &str, snap: &Snapshot) -> Result<PathBuf> {
+    let path = dir(data_dir).join(file_name);
+    write_atomic(&path, &serde_json::to_vec_pretty(snap)?)?;
+    Ok(path)
+}
+
 pub fn load(path: &Path) -> Result<Snapshot> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
