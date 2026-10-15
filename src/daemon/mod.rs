@@ -28,8 +28,8 @@ use ui::{Ui, UiBridge};
 pub const SCAN_DEFAULT_LIMIT: usize = 200;
 
 /// Spec §10: file operations on the real desktop stay locked until the user writes
-/// «можно на живом». Flip this only on their explicit go-ahead.
-pub const LIVE_FILE_OPS_UNLOCKED: bool = false;
+/// «можно на живом». Unlocked on 2026-10-15 at the user's explicit go-ahead.
+pub const LIVE_FILE_OPS_UNLOCKED: bool = true;
 
 struct State {
     config: Config,
