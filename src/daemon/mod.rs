@@ -503,6 +503,22 @@ fn handle_ui_events(state: Arc<State>, rx: std::sync::mpsc::Receiver<ui::UiEvent
                         .apply_now(&id)
                         .map_err(|e| anyhow::anyhow!(e.message))?;
                     tracing::info!(plan = %id, state = ?sp.state, "applied from preview");
+                    let (title, text) = if sp.state == PlanState::Applied {
+                        (
+                            "Nook: план применён".to_string(),
+                            format!("{} · откатить: трей → «Отменить последнее»", sp.summary),
+                        )
+                    } else {
+                        let cause = sp
+                            .results
+                            .iter()
+                            .rev()
+                            .find(|r| r.status == "failed" || r.op == "rollback")
+                            .map(|r| r.detail.clone())
+                            .unwrap_or_default();
+                        ("Nook: не применено, стол не изменён".to_string(), cause)
+                    };
+                    let _ = state.ui.notify(&title, &text);
                 }
                 ui::UiEvent::Reject(id) => {
                     apply::set_state(&id, PlanState::Rejected, &state.store)?;
@@ -547,6 +563,7 @@ fn handle_ui_events(state: Arc<State>, rx: std::sync::mpsc::Receiver<ui::UiEvent
         })();
         if let Err(e) = r {
             tracing::error!("ui event failed: {e:#}");
+            let _ = state.ui.notify("Nook: ошибка", &format!("{e:#}"));
         }
     }
 }

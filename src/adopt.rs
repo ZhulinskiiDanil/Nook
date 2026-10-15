@@ -94,13 +94,41 @@ fn is_shortcut(p: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("lnk") || e.eq_ignore_ascii_case("url"))
 }
 
+/// A moved file keeps the Public Desktop's ACL (admin-only writes). Reset it so it inherits
+/// from the user's Desktop like any file created there. Same as `icacls <file> /reset`.
+fn inherit_acl(p: &Path) -> Result<()> {
+    let out = std::process::Command::new("icacls")
+        .arg(p)
+        .arg("/reset")
+        .arg("/Q")
+        .output()
+        .context("icacls")?;
+    if !out.status.success() {
+        bail!(
+            "icacls /reset failed for {}: {}",
+            p.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Elevated side: moves shortcuts from `public` to `user` (all, or only `names`).
+/// Also repairs the ACL of everything adopted earlier (idempotent).
 pub fn adopt(public: &Path, user: &Path, record: &Path, names: &[String]) -> Result<Vec<String>> {
     if !is_elevated() {
         bail!("needs administrator rights");
     }
     let mut rec = load(record);
     let mut report = Vec::new();
+    for a in &rec.items {
+        if a.to.exists() {
+            match inherit_acl(&a.to) {
+                Ok(()) => report.push(format!("{}: permissions fixed", a.to.display())),
+                Err(e) => report.push(format!("{e:#}")),
+            }
+        }
+    }
     for e in std::fs::read_dir(public)?.flatten() {
         let from = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
@@ -117,7 +145,9 @@ pub fn adopt(public: &Path, user: &Path, record: &Path, names: &[String]) -> Res
                     to: to.clone(),
                 });
                 save(record, &rec)?; // after every move: a crash never loses track
-                report.push(format!("{name} → {}", to.display()));
+                let acl = inherit_acl(&to)
+                    .map_or_else(|e| format!(" (permissions: {e:#})"), |_| String::new());
+                report.push(format!("{name} → {}{acl}", to.display()));
             }
             Err(err) => report.push(format!("{name}: {err:#}")),
         }

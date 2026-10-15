@@ -112,6 +112,26 @@ impl UiBridge {
         self.call(move || set_plan_ui(plan))
     }
 
+    /// Shows a tray balloon (Windows toast) with a short result message.
+    pub fn notify(&self, title: &str, text: &str) -> Result<()> {
+        let (title, text) = (title.to_string(), text.to_string());
+        self.call(move || {
+            with_state(|s| {
+                let mut nid = tray_data(s);
+                nid.uFlags |= windows::Win32::UI::Shell::NIF_INFO;
+                let t: Vec<u16> = title
+                    .encode_utf16()
+                    .take(nid.szInfoTitle.len() - 1)
+                    .collect();
+                nid.szInfoTitle[..t.len()].copy_from_slice(&t);
+                let b: Vec<u16> = text.encode_utf16().take(nid.szInfo.len() - 1).collect();
+                nid.szInfo[..b.len()].copy_from_slice(&b);
+                // SAFETY: valid NOTIFYICONDATAW for our icon.
+                let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+            });
+        })
+    }
+
     /// Uploads a ready preview frame into the (hidden) overlay so showing is instant.
     pub fn set_frame(&self, frame: Frame) -> Result<()> {
         self.call(move || upload_frame(frame))?
