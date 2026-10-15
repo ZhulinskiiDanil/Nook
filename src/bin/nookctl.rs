@@ -40,6 +40,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// stdio MCP server for Claude Code (proxies to the daemon, starting it if needed).
+    Mcp,
+    /// Call a daemon IPC method directly, e.g. `call status` or `call scan {"limit":5}`.
+    Call {
+        method: String,
+        /// JSON params.
+        params: Option<String>,
+    },
     /// Development sandbox.
     Sandbox {
         #[command(subcommand)]
@@ -169,7 +177,31 @@ fn main() -> Result<()> {
     let _config = Config::load_or_create(&dirs.config_file())?;
     let _com = ComApartment::sta()?;
 
+    if let Command::Mcp = cli.command {
+        tracing::info!("mcp server starting");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let r = rt.block_on(nook::mcp::serve_stdio());
+        tracing::info!("mcp server stopped: {r:?}");
+        return r;
+    }
     match cli.command {
+        Command::Mcp => unreachable!(),
+        Command::Call { method, params } => {
+            let params: serde_json::Value = match params {
+                Some(p) => serde_json::from_str(&p).context("params must be JSON")?,
+                None => serde_json::Value::Null,
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let v = rt.block_on(async {
+                let mut c = nook::ipc::client::Client::connect_or_start().await?;
+                c.call(&method, params).await
+            })?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
         Command::Doctor { json } => {
             tracing::info!("doctor");
             let report = Report::collect();

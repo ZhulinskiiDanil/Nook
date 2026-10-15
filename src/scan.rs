@@ -13,7 +13,7 @@ use crate::intel::taskbar_pins::Pins;
 use crate::intel::uninstall::{self, Programs};
 use crate::intel::{hashing, userassist};
 use crate::paths::Desktops;
-use crate::shell::desktop_view::{DesktopView, cell_of};
+use crate::shell::desktop_view::{DesktopView, ViewInfo, ViewItem, cell_of};
 use crate::shell::explorer_settings::{VIRTUAL_ICONS, visible_virtual_icons};
 use crate::shell::fileinfo::{file_id, version_strings};
 use crate::shell::shortcuts::{LinkInfo, read_lnk, read_url, target_key};
@@ -208,6 +208,21 @@ struct Raw {
 
 /// Collects all items. Requires an STA thread with COM initialised.
 pub fn scan(desktops: &Desktops) -> Result<ScanResult> {
+    scan_with(desktops, view_snapshot)
+}
+
+/// Reads grid info and item positions from the desktop view. STA thread only.
+pub fn view_snapshot() -> Result<(ViewInfo, Vec<ViewItem>)> {
+    let v = DesktopView::open()?;
+    Ok((v.info()?, v.items()?))
+}
+
+/// Like [`scan`], but the view snapshot comes from `view_source` (e.g. the daemon UI thread).
+/// Not called in sandbox mode. Needs COM on the calling thread for shortcuts and hints.
+pub fn scan_with(
+    desktops: &Desktops,
+    view_source: impl FnOnce() -> Result<(ViewInfo, Vec<ViewItem>)>,
+) -> Result<ScanResult> {
     let now = SystemTime::now();
     let mut warnings = Vec::new();
 
@@ -280,7 +295,7 @@ pub fn scan(desktops: &Desktops) -> Result<ScanResult> {
             fictitious: true,
         });
     } else {
-        match DesktopView::open().and_then(|v| Ok((v.info()?, v.items()?))) {
+        match view_source() {
             Ok((info, view_items)) => {
                 grid = Some(GridInfo {
                     step_x: info.spacing_x,

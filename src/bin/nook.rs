@@ -1,13 +1,10 @@
-//! `nook.exe` — the daemon. M0: single instance, DPI, config, logging, STA message loop.
+//! `nook.exe` — the daemon: tray, IPC, desktop view access (later: hotkey, preview, inbox).
 #![windows_subsystem = "windows"]
 
 use anyhow::{Context, Result};
 use nook::config::Config;
 use nook::paths::AppDirs;
-use nook::platform::{ComApartment, SingleInstance, enable_per_monitor_dpi};
-use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, TranslateMessage,
-};
+use nook::platform::{SingleInstance, enable_per_monitor_dpi};
 
 fn main() -> Result<()> {
     enable_per_monitor_dpi().ok();
@@ -19,18 +16,12 @@ fn main() -> Result<()> {
         return Ok(());
     };
     let config = Config::load_or_create(&dirs.config_file()).context("config")?;
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), ?config.layout, "nook started");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "nook started");
 
-    let _com = ComApartment::sta()?;
-    // Tray, hotkey, IPC and watchers attach to this loop in later milestones.
-    // SAFETY: standard Win32 message pump on the thread that owns the apartment.
-    unsafe {
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+    let r = nook::daemon::run(config);
+    if let Err(e) = &r {
+        tracing::error!("daemon failed: {e:#}");
     }
     tracing::info!("nook exiting");
-    Ok(())
+    r
 }
