@@ -10,7 +10,7 @@ Spec: [TASK.md](TASK.md) · wireframe: [docs/wireframe.svg](docs/wireframe.svg)
 - [x] M0 — skeleton, config, logging, DPI, single instance, `nookctl doctor`
 - [x] M1 — scan & peek (read-only), `dump`, `sandbox init`
 - [x] M2 — daemon (tray, IPC) & MCP: `status`, `scan`, `peek` (read-only)
-- [ ] M3 — layout
+- [x] M3 — layout: keep_free zones, engine, `layout --dry-run|--apply`, `positions save|restore|diff`
 - [ ] M4 — plans, journal, quarantine, undo
 - [ ] M5 — preview & hotkeys
 - [ ] M6 — inbox, keeper, folder icons

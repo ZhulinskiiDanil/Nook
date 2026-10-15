@@ -12,7 +12,8 @@ use windows::Win32::UI::Shell::{
     CSIDL_DESKTOP, FOLDERFLAGS, FOLDERVIEWMODE, FVM_ICON, FWF_AUTOARRANGE, FWF_NOICONS,
     FWF_SNAPTOGRID, IFolderView2, ILFree, IShellBrowser, IShellItem, IShellWindows,
     SID_STopLevelBrowser, SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
-    SIGDN_NORMALDISPLAY, SVGIO_ALLVIEW, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows,
+    SIGDN_NORMALDISPLAY, SVGIO_ALLVIEW, SVSI_POSITIONITEM, SWC_DESKTOP, SWFO_NEEDDISPATCH,
+    ShellWindows,
 };
 use windows::core::Interface;
 
@@ -135,6 +136,80 @@ impl DesktopView {
         }
         Ok(out)
     }
+}
+
+impl DesktopView {
+    /// Moves items (keyed by lowercase parsing name) to view points in ONE batch call,
+    /// so the desktop doesn't flicker. Unknown keys are ignored. Returns how many moved.
+    /// Touches icon positions only — never files.
+    pub fn set_positions(
+        &self,
+        targets: &std::collections::HashMap<String, (i32, i32)>,
+    ) -> Result<usize> {
+        let mut pidls = Vec::new();
+        let mut points = Vec::new();
+        // SAFETY: PIDLs from Item() are freed with ILFree after the batch call.
+        unsafe {
+            let n = self.view.ItemCount(SVGIO_ALLVIEW).context("ItemCount")?;
+            for i in 0..n {
+                let Ok(item) = self.view.GetItem::<IShellItem>(i) else {
+                    continue;
+                };
+                let key = display_name(&item, SIGDN_FILESYSPATH)
+                    .or_else(|| display_name(&item, SIGDN_DESKTOPABSOLUTEPARSING))
+                    .map(|s| s.to_lowercase());
+                let Some(&(x, y)) = key.as_ref().and_then(|k| targets.get(k)) else {
+                    continue;
+                };
+                let Ok(pidl) = self.view.Item(i) else {
+                    continue;
+                };
+                pidls.push(pidl as *const _);
+                points.push(POINT { x, y });
+            }
+            let r = if pidls.is_empty() {
+                Ok(())
+            } else {
+                self.view.SelectAndPositionItems(
+                    pidls.len() as u32,
+                    pidls.as_ptr(),
+                    Some(points.as_ptr()),
+                    SVSI_POSITIONITEM.0 as u32,
+                )
+            };
+            for p in &pidls {
+                ILFree(Some(*p));
+            }
+            r.context("SelectAndPositionItems")?;
+        }
+        Ok(points.len())
+    }
+}
+
+/// Grid origin offset: the most common `x mod step` / `y mod step` among current items.
+pub fn grid_origin(items: &[ViewItem], step_x: i32, step_y: i32) -> (i32, i32) {
+    fn mode(vals: impl Iterator<Item = i32>) -> i32 {
+        let mut counts = std::collections::BTreeMap::new();
+        for v in vals {
+            *counts.entry(v).or_insert(0usize) += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|&(v, n)| (n, std::cmp::Reverse(v)))
+            .map_or(0, |(v, _)| v)
+    }
+    if step_x <= 0 || step_y <= 0 {
+        return (0, 0);
+    }
+    (
+        mode(items.iter().map(|i| i.x.rem_euclid(step_x))),
+        mode(items.iter().map(|i| i.y.rem_euclid(step_y))),
+    )
+}
+
+/// Grid cell → view point (top-left of the slot), inverse of [`cell_of`].
+pub fn point_of(col: i32, row: i32, step_x: i32, step_y: i32, origin: (i32, i32)) -> (i32, i32) {
+    (col * step_x + origin.0, row * step_y + origin.1)
 }
 
 /// View position → grid cell (nearest slot).
