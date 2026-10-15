@@ -820,16 +820,35 @@ fn revert(step: &Step, env: &Env) -> Result<String> {
             if !backup.exists() {
                 return Ok("no backup (step never ran)".into());
             }
-            if path.exists() {
-                std::fs::create_dir_all(park.parent().unwrap())?;
-                let to = free_name(
-                    park.parent().unwrap(),
-                    &park.file_name().unwrap().to_string_lossy(),
-                    &|p| p.exists(),
-                );
-                move_path(path, &to)?;
+            if !path.exists() {
+                move_path(backup, path)?;
+                notify_item(path);
+                return Ok("file was gone; original put back".into());
             }
-            move_path(backup, path)?;
+            // Write the original bytes back INTO the same file: its FileId (Nook's identity
+            // for the item) stays the same. The changed version is kept in the park folder.
+            let original = std::fs::read(backup)?;
+            let meta = std::fs::metadata(backup)?;
+            std::fs::create_dir_all(park.parent().unwrap())?;
+            let keep = free_name(
+                park.parent().unwrap(),
+                &park.file_name().unwrap().to_string_lossy(),
+                &|p| p.exists(),
+            );
+            std::fs::copy(path, &keep)?;
+            {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(path)?;
+                f.write_all(&original)?;
+                let mut t = std::fs::FileTimes::new();
+                if let Ok(m) = meta.modified() {
+                    t = t.set_modified(m);
+                }
+                let _ = f.set_times(t);
+            }
             notify_item(path);
             Ok(String::new())
         }

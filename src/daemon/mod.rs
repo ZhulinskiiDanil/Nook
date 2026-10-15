@@ -88,23 +88,17 @@ impl State {
     }
 
     fn apply_now(self: &Arc<Self>, id: &str) -> Result<StoredPlan, HandlerError> {
-        use std::sync::atomic::Ordering;
         self.guard_live()?;
         let _g = self.apply_lock.lock().unwrap();
         let scan = self.scan()?;
         let _com = ComApartment::sta()?;
-        self.applying.store(true, Ordering::Relaxed);
+        self.quiet_watcher();
         let sp = self.with_env(|env| apply::apply(id, &scan, env));
         drop(_g);
-        // Let the watcher drain the plan's own file events before arrivals count again.
-        let st = self.clone();
-        let _ = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(2));
-            st.applying.store(false, Ordering::Relaxed);
-        });
+        self.release_watcher();
         let sp = sp?;
         if sp.state == PlanState::Applied
-            && let Err(e) = keeper_svc::remember_applied(self, &sp.plan)
+            && let Err(e) = keeper_svc::remember_applied(self, &sp)
         {
             tracing::warn!("keeper: could not record the layout: {e:#}");
         }
@@ -116,11 +110,49 @@ impl State {
         self.guard_live()?;
         let _g = self.apply_lock.lock().unwrap();
         let _com = ComApartment::sta()?;
-        let sp = self.with_env(|env| apply::undo(id, env))?;
+        // Undo renames/moves files back: not inbox arrivals either.
+        self.quiet_watcher();
+        let sp = self.with_env(|env| apply::undo(id, env));
         drop(_g);
-        keeper_svc::forget(self);
+        self.release_watcher();
+        let sp = sp?;
+        // Hold the layout of the plan that is still in effect (if any), on today's grid.
+        if let Err(e) = self.rekeep() {
+            tracing::warn!("keeper after undo: {e:#}");
+        }
         self.changed();
         Ok(sp)
+    }
+
+    /// Suppresses inbox arrivals while Nook itself moves files.
+    fn quiet_watcher(&self) {
+        self.applying
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Re-enables arrivals 3 s after Nook's own file work ends (the watcher lags a little).
+    fn release_watcher(self: &Arc<Self>) {
+        let st = self.clone();
+        let _ = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            st.applying
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
+    /// Re-derives what the keeper holds from the last applied plan and lays it out on the
+    /// current grid. With no applied plan the keeper lets go.
+    fn rekeep(self: &Arc<Self>) -> Result<()> {
+        match self.store.last_applied(self.desktops.is_sandbox()) {
+            Some(prev) => {
+                keeper_svc::remember_applied(self, &prev)?;
+                keeper_svc::relayout(self)
+            }
+            None => {
+                keeper_svc::forget(self);
+                Ok(())
+            }
+        }
     }
 
     fn guard_live(&self) -> Result<(), HandlerError> {
@@ -374,6 +406,13 @@ fn dispatch(state: Arc<State>, method: String, p: Value) -> HandlerFuture {
         "undo" => blocking(move || {
             let op: OptIdParams = params(p)?;
             Ok(decision_view(&state.undo_now(op.plan_id.as_deref())?))
+        }),
+        "relayout" => blocking(move || {
+            state.guard_live()?;
+            let _com = ComApartment::sta()?;
+            state.rekeep()?;
+            let n = state.keeper.lock().unwrap().items.len();
+            Ok(json!({ "kept": n }))
         }),
         "history" => blocking(move || {
             let hp: HistoryParams = params(p)?;

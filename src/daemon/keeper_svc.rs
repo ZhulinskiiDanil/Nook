@@ -55,6 +55,9 @@ fn snap(state: &State) -> Result<Snap> {
 }
 
 impl Snap {
+    fn grid(&self) -> (i32, i32, i32, i32) {
+        (self.step.0, self.step.1, self.cols, self.rows)
+    }
     fn cell(&self, v: &ViewItem) -> Cell {
         let (c, r) = cell_of(
             v.x - self.origin.0,
@@ -86,16 +89,38 @@ fn place(state: &State, targets: HashMap<String, (i32, i32)>) -> Result<usize> {
 /// Remembers the layout Nook just applied so the keeper can hold it.
 pub(super) fn remember_applied(
     state: &Arc<State>,
-    plan: &crate::plan::model::PlanInput,
+    sp: &crate::plan::model::StoredPlan,
 ) -> Result<()> {
     if state.desktops.is_sandbox() {
         return Ok(());
     }
+    let plan = &sp.plan;
     let scan = state.scan()?;
     let s = snap(state)?;
     let cells = s.cells();
-    let by_id: HashMap<&str, &crate::scan::Item> =
+    let mut by_id: HashMap<&str, &crate::scan::Item> =
         scan.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    // An id can change if a file was replaced since (e.g. re-created by its app): fall back to
+    // the file name the plan saw, if exactly one desktop item still has it.
+    for (id, seen) in &sp.seen {
+        if by_id.contains_key(id.as_str()) {
+            continue;
+        }
+        let Some(name) = std::path::Path::new(&seen.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+        else {
+            continue;
+        };
+        let matches: Vec<&crate::scan::Item> = scan
+            .items
+            .iter()
+            .filter(|i| i.name.to_lowercase() == name)
+            .collect();
+        if let [one] = matches.as_slice() {
+            by_id.insert(id.as_str(), one);
+        }
+    }
     let mut kept = Vec::new();
     for (g, entries) in [
         (Group::Apps, &plan.layout.apps),
@@ -126,7 +151,10 @@ pub(super) fn remember_applied(
             });
         }
     }
-    let ks = KeeperState { items: kept };
+    let ks = KeeperState {
+        items: kept,
+        grid: Some(s.grid()),
+    };
     keeper::save(&state_file(state), &ks)?;
     *state.keeper.lock().unwrap() = ks;
     Ok(())
@@ -145,8 +173,13 @@ pub(super) fn check(state: &State) -> Result<()> {
     if state.desktops.is_sandbox() || state.keeper.lock().unwrap().items.is_empty() {
         return Ok(());
     }
-    let _g = state.apply_lock.lock().unwrap();
+    // Icon size, DPI or resolution changed: old cells mean nothing on the new grid.
     let s = snap(state)?;
+    if state.keeper.lock().unwrap().stale_for(s.grid()) {
+        tracing::info!(grid = ?s.grid(), "keeper: grid changed (icon size / DPI / resolution)");
+        return relayout(state);
+    }
+    let _g = state.apply_lock.lock().unwrap();
     let cells = s.cells();
     let mut ks = state.keeper.lock().unwrap().clone();
     let current: Vec<Option<Cell>> = ks
@@ -229,6 +262,7 @@ pub(super) fn relayout(state: &State) -> Result<()> {
         rows = s.rows,
         "keeper: display changed; layout recomputed"
     );
+    ks.grid = Some(s.grid());
     keeper::save(&state_file(state), &ks)?;
     *state.keeper.lock().unwrap() = ks;
     Ok(())
@@ -252,13 +286,18 @@ pub(super) fn spawn_keeper(state: Arc<State>) {
 // ---------------------------------------------------------------- inbox
 
 /// Puts a newly arrived item into the next free inbox cell once it shows up in the view.
+/// Runs serially (one placement at a time) and looks at the desktop under the apply lock,
+/// so two arrivals never get the same cell.
 fn place_in_inbox(state: &State, path: PathBuf) -> Result<()> {
     let key = path.to_string_lossy().to_lowercase();
     let deadline = Instant::now() + Duration::from_secs(3);
-    let s = loop {
-        let s = snap(state)?;
-        if s.items.iter().any(|v| v.parsing.to_lowercase() == key) {
-            break s;
+    loop {
+        if snap(state)?
+            .items
+            .iter()
+            .any(|v| v.parsing.to_lowercase() == key)
+        {
+            break;
         }
         if Instant::now() > deadline {
             anyhow::bail!(
@@ -267,8 +306,9 @@ fn place_in_inbox(state: &State, path: PathBuf) -> Result<()> {
             );
         }
         std::thread::sleep(Duration::from_millis(150));
-    };
+    }
     let _g = state.apply_lock.lock().unwrap();
+    let s = snap(state)?;
     let occupied: HashSet<Cell> = s
         .items
         .iter()
@@ -308,7 +348,17 @@ fn place_in_inbox(state: &State, path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Watches user + public desktop folders; new arrivals go to the inbox corner.
+fn desktop_names(state: &State) -> Vec<String> {
+    [&state.desktops.user, &state.desktops.public]
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Watches user + public desktop folders; genuinely new items go to the inbox corner.
 pub(super) fn spawn_inbox(state: Arc<State>) -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(tx)?;
@@ -319,21 +369,35 @@ pub(super) fn spawn_inbox(state: Arc<State>) -> Result<()> {
                 .with_context(|| format!("watch {}", d.display()))?;
         }
     }
+    // One placement worker: arrivals are placed strictly one after another.
+    let (place_tx, place_rx) = std::sync::mpsc::channel::<PathBuf>();
+    {
+        let st = state.clone();
+        std::thread::Builder::new()
+            .name("inbox-place".into())
+            .spawn(move || {
+                let _com = crate::platform::ComApartment::sta();
+                for path in place_rx {
+                    if let Err(e) = place_in_inbox(&st, path) {
+                        tracing::warn!("inbox: {e:#}");
+                    }
+                }
+            })?;
+    }
     std::thread::Builder::new().name("inbox".into()).spawn(move || {
         let _keep_alive = watcher;
-        let _com = crate::platform::ComApartment::sta();
-        let mut arrivals = Arrivals::default();
+        let mut arrivals = Arrivals::new(desktop_names(&state));
         for res in rx {
             let Ok(ev) = res else { continue };
             let name = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned());
+            let each = |f: fn(String) -> FsEvent| -> Vec<(FsEvent, PathBuf)> {
+                ev.paths.iter().filter_map(|p| Some((f(name(p)?), p.clone()))).collect()
+            };
             let simple: Vec<(FsEvent, PathBuf)> = match ev.kind {
-                EventKind::Create(_) => ev.paths.iter().filter_map(|p| Some((FsEvent::Created(name(p)?), p.clone()))).collect(),
-                EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-                    ev.paths.iter().filter_map(|p| Some((FsEvent::RenamedFrom(name(p)?), p.clone()))).collect()
-                }
-                EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-                    ev.paths.iter().filter_map(|p| Some((FsEvent::RenamedTo(name(p)?), p.clone()))).collect()
-                }
+                EventKind::Create(_) => each(FsEvent::Created),
+                EventKind::Remove(_) => each(FsEvent::Removed),
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)) => each(FsEvent::RenamedFrom),
+                EventKind::Modify(ModifyKind::Name(RenameMode::To)) => each(FsEvent::RenamedTo),
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if ev.paths.len() == 2 => {
                     let (a, b) = (&ev.paths[0], &ev.paths[1]);
                     match (name(a), name(b)) {
@@ -345,6 +409,10 @@ pub(super) fn spawn_inbox(state: Arc<State>) -> Result<()> {
             };
             for (fe, path) in simple {
                 let Some(n) = arrivals.feed(fe, &state.config.inbox.ignore) else { continue };
+                // A plan apply moves/renames files on purpose; those are not arrivals.
+                if state.applying.load(Ordering::Relaxed) {
+                    continue;
+                }
                 if !state.config.inbox.enabled || state.pause_inbox.load(Ordering::Relaxed) {
                     tracing::info!(file = %n, "inbox: paused, leaving it where it is");
                     continue;
@@ -353,17 +421,7 @@ pub(super) fn spawn_inbox(state: Arc<State>) -> Result<()> {
                     tracing::info!(file = %n, "inbox (sandbox): would place in the inbox corner");
                     continue;
                 }
-                let st = state.clone();
-                // A plan apply moves files around on purpose; don't treat those as arrivals.
-                if st.applying.load(Ordering::Relaxed) {
-                    continue;
-                }
-                let _ = std::thread::Builder::new().name("inbox-place".into()).spawn(move || {
-                    let _com = crate::platform::ComApartment::sta();
-                    if let Err(e) = place_in_inbox(&st, path) {
-                        tracing::warn!("inbox: {e:#}");
-                    }
-                });
+                let _ = place_tx.send(path);
             }
         }
     })?;

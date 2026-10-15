@@ -86,6 +86,8 @@ enum Command {
         #[arg(long, hide = true)]
         report: Option<PathBuf>,
     },
+    /// Re-lay the desktop by the plan currently in effect, on the current grid.
+    Relayout,
     /// Undo the last applied plan, or the given one.
     Undo { plan_id: Option<String> },
     /// Applied / undone / failed plans.
@@ -322,6 +324,7 @@ fn main() -> Result<()> {
         Command::Mcp => unreachable!(),
         Command::Apply { plan_id } => ipc("apply_plan", serde_json::json!({ "id": plan_id }))?,
         Command::Undo { plan_id } => ipc("undo", serde_json::json!({ "plan_id": plan_id }))?,
+        Command::Relayout => ipc("relayout", serde_json::Value::Null)?,
         Command::AdoptPublic {
             names,
             undo,

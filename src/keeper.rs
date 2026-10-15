@@ -29,6 +29,20 @@ pub struct Kept {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KeeperState {
     pub items: Vec<Kept>,
+    /// Grid the cells refer to: (step_x, step_y, cols, rows). Icon size / DPI / resolution
+    /// changes alter it; then the layout is recomputed instead of restored.
+    #[serde(default)]
+    pub grid: Option<(i32, i32, i32, i32)>,
+}
+
+impl KeeperState {
+    /// Cells no longer valid on `grid` (different step, or outside the area).
+    pub fn stale_for(&self, grid: (i32, i32, i32, i32)) -> bool {
+        self.grid.is_some_and(|g| g != grid)
+            || self.items.iter().any(|k| {
+                k.cell.col < 0 || k.cell.row < 0 || k.cell.col >= grid.2 || k.cell.row >= grid.3
+            })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -105,6 +119,7 @@ pub enum FsEvent {
     Created(String),
     RenamedFrom(String),
     RenamedTo(String),
+    Removed(String),
 }
 
 /// Decides which events mean "a new item landed on the desktop". Keeps the last
@@ -112,23 +127,42 @@ pub enum FsEvent {
 #[derive(Debug, Default)]
 pub struct Arrivals {
     pending_from: Option<String>,
+    /// Names already on the desktop (lowercase). Apps and Explorer often re-save an existing
+    /// file via "write temp, rename over": that is not a new item.
+    known: std::collections::HashSet<String>,
 }
 
 impl Arrivals {
+    pub fn new(existing: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            pending_from: None,
+            known: existing.into_iter().map(|n| n.to_lowercase()).collect(),
+        }
+    }
+
     /// Returns the file name to place in the inbox, if any.
     pub fn feed(&mut self, ev: FsEvent, ignore: &[String]) -> Option<String> {
         match ev {
-            FsEvent::Created(n) => (!ignored(&n, ignore) && !is_partial(&n)).then_some(n),
+            FsEvent::Created(n) => {
+                let new = self.known.insert(n.to_lowercase());
+                (new && !ignored(&n, ignore) && !is_partial(&n)).then_some(n)
+            }
             FsEvent::RenamedFrom(n) => {
+                self.known.remove(&n.to_lowercase());
                 self.pending_from = Some(n);
                 None
             }
             FsEvent::RenamedTo(n) => {
                 let from = self.pending_from.take();
+                let new = self.known.insert(n.to_lowercase());
                 let arrived = from
                     .as_deref()
                     .is_none_or(|f| is_partial(f) || ignored(f, ignore));
-                (arrived && !ignored(&n, ignore) && !is_partial(&n)).then_some(n)
+                (new && arrived && !ignored(&n, ignore) && !is_partial(&n)).then_some(n)
+            }
+            FsEvent::Removed(n) => {
+                self.known.remove(&n.to_lowercase());
+                None
             }
         }
     }
@@ -171,10 +205,23 @@ mod tests {
                     pinned: false,
                 })
                 .collect(),
+            grid: None,
         }
     }
     fn c(col: i32, row: i32) -> Option<Cell> {
         Some(Cell { col, row })
+    }
+
+    #[test]
+    fn grid_change_makes_cells_stale() {
+        let mut s = st(&[(1, 1), (1, 15)]);
+        // Old state without a recorded grid: row 15 doesn't exist on a 14-row grid.
+        assert!(s.stale_for((75, 98, 34, 14)));
+        assert!(!s.stale_for((75, 85, 34, 16)));
+        // Icons got bigger: same cells, different step.
+        s.grid = Some((75, 85, 34, 16));
+        assert!(s.stale_for((75, 98, 34, 16)));
+        assert!(!s.stale_for((75, 85, 34, 16)));
     }
 
     #[test]
@@ -216,7 +263,7 @@ mod tests {
         let ign: Vec<String> = ["*.tmp", "*.crdownload", "*.part", "~$*", "desktop.ini"]
             .map(String::from)
             .to_vec();
-        let mut a = Arrivals::default();
+        let mut a = Arrivals::new(["robot_03.png".to_string()]);
         // Chrome: create .crdownload, then rename to the final name.
         assert_eq!(
             a.feed(FsEvent::Created("film.mkv.crdownload".into()), &ign),
@@ -243,6 +290,24 @@ mod tests {
             Some("moved-in.zip".into())
         );
         assert_eq!(a.feed(FsEvent::Created("desktop.ini".into()), &ign), None);
+        // Explorer re-saves an existing shortcut: temp file, then rename over the old name.
+        let mut b = Arrivals::new(["Spotify.lnk".to_string()]);
+        assert_eq!(b.feed(FsEvent::Created("~shl1234.tmp".into()), &ign), None);
+        assert_eq!(
+            b.feed(FsEvent::RenamedFrom("~shl1234.tmp".into()), &ign),
+            None
+        );
+        assert_eq!(
+            b.feed(FsEvent::RenamedTo("Spotify.lnk".into()), &ign),
+            None,
+            "re-save is not new"
+        );
+        // But a file that was deleted and comes back counts again.
+        assert_eq!(b.feed(FsEvent::Removed("Spotify.lnk".into()), &ign), None);
+        assert_eq!(
+            b.feed(FsEvent::Created("Spotify.lnk".into()), &ign),
+            Some("Spotify.lnk".into())
+        );
         assert_eq!(a.feed(FsEvent::Created("~$отчёт.docx".into()), &ign), None);
     }
 }
