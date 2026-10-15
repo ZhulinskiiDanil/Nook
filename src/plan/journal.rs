@@ -37,6 +37,13 @@ pub enum Step {
         park: PathBuf,
         old_attrs: Option<u32>,
     },
+    /// File changed in place (shortcut icon). `backup` is a copy of the original bytes;
+    /// undo parks the changed file in `park` and moves the backup back.
+    ModifyFile {
+        path: PathBuf,
+        backup: PathBuf,
+        park: PathBuf,
+    },
     /// HKCU DWORD. `old: None` = value did not exist.
     Registry {
         key: String,

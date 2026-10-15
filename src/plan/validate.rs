@@ -15,6 +15,8 @@ pub struct Ctx<'a> {
     pub allowed_roots: Vec<PathBuf>,
     /// Explorer shows hidden files (needed for `dim`).
     pub shows_hidden: bool,
+    /// `[icons] enabled`: styled items dim via a muted icon; restyle_icon allowed.
+    pub icons_enabled: bool,
     /// Other env vars for `%NAME%` (USERPROFILE etc.).
     pub env: &'a dyn Fn(&str) -> Option<String>,
 }
@@ -71,6 +73,11 @@ pub fn valid_name(name: &str) -> Result<(), String> {
         return Err(format!("{stem} is a reserved device name"));
     }
     Ok(())
+}
+
+/// Kinds that can carry a Nook icon style (spec §5.4).
+pub fn styleable(k: Kind) -> bool {
+    matches!(k, Kind::Shortcut | Kind::Url | Kind::Folder)
 }
 
 /// Expands `%DESKTOP%` and other `%VARS%` in a path from a plan.
@@ -269,7 +276,11 @@ pub fn validate(plan: &PlanInput, ctx: &Ctx) -> Result<Checked, Vec<String>> {
                 need_item(&mut errors);
                 need_writable(&mut errors);
                 not_os(&mut errors);
-                if *value && !ctx.shows_hidden {
+                // Styled items dim via a muted icon; others via the Hidden attribute.
+                if *value
+                    && !ctx.shows_hidden
+                    && !item.is_some_and(|i| ctx.icons_enabled && styleable(i.kind))
+                {
                     errors.push(format!(
                         "{at}: Explorer hides hidden files, so dim would make {name} disappear (needs Hidden = 1)"
                     ));
@@ -289,8 +300,23 @@ pub fn validate(plan: &PlanInput, ctx: &Ctx) -> Result<Checked, Vec<String>> {
                 }
             }
             Action::ExplorerSetting { .. } => {}
-            Action::RestyleIcon { .. } => {
-                errors.push(format!("{at}: restyle_icon arrives in M6 (icon styles)"));
+            Action::RestyleIcon { style, .. } => {
+                if !ctx.icons_enabled {
+                    errors.push(format!(
+                        "{at}: icon styles are disabled in config ([icons] enabled = false)"
+                    ));
+                }
+                if !matches!(style.as_str(), "tile" | "orb" | "muted") {
+                    errors.push(format!("{at}: style must be tile, orb or muted"));
+                }
+                if let Some(i) = item {
+                    need_writable(&mut errors);
+                    if !styleable(i.kind) {
+                        errors.push(format!(
+                            "{at}: {name}: only shortcuts (.lnk/.url) and folders can be restyled"
+                        ));
+                    }
+                }
             }
         }
     }
@@ -434,6 +460,7 @@ mod tests {
             desktop: PathBuf::from(r"C:\sb\Desktop"),
             allowed_roots: vec![PathBuf::from(r"C:\sb\Desktop")],
             shows_hidden: true,
+            icons_enabled: true,
             env: &env,
         }
     }
@@ -614,6 +641,15 @@ mod tests {
         let it = items();
         let mut c = ctx(&it);
         c.shows_hidden = false;
+        // With icon styles a folder dims via a muted icon, Hidden isn't needed.
+        let mut styled = good();
+        styled.actions.push(Action::Dim {
+            item: "it_dev".into(),
+            value: true,
+            reason: "old".into(),
+        });
+        assert!(validate(&styled, &c).is_ok());
+        c.icons_enabled = false;
         let mut p = good();
         p.actions.push(Action::Dim {
             item: "it_dev".into(),

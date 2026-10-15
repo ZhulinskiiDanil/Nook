@@ -20,9 +20,6 @@ use windows::Win32::Graphics::Imaging::{
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::HiDpi::SystemParametersInfoForDpi;
-use windows::Win32::UI::Shell::{
-    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
-};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetWindowRect, GetWindowThreadProcessId,
     SPI_GETICONTITLELOGFONT,
@@ -308,16 +305,8 @@ unsafe fn dib(
 
 /// Shell icon (no thumbnail) at `size` px for a path or `::{CLSID}`.
 pub fn shell_icon(parsing: &str, size: i32) -> Result<Pixmap> {
-    // SAFETY: COM + GDI handled inside thumbs; here only the factory call differs.
-    unsafe {
-        let f: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(parsing), None)?;
-        let hbm = f.GetImage(
-            windows::Win32::Foundation::SIZE { cx: size, cy: size },
-            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
-        )?;
-        let rgba = crate::shell::thumbs::hbitmap_to_rgba(hbm)?;
-        to_pixmap(&rgba).context("icon pixmap")
-    }
+    let rgba = crate::shell::thumbs::shell_icon_rgba(parsing, size)?;
+    to_pixmap(&rgba).context("icon pixmap")
 }
 
 /// Explorer's icon caption font at `dpi`.

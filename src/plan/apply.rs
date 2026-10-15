@@ -8,7 +8,8 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
-use crate::config::Config;
+use crate::config::{Config, IconStyle};
+use crate::icons::Shape;
 use crate::layout::engine::{self, Cell, Entry, Group};
 use crate::layout::free_zones::blocked_cells;
 use crate::paths::Desktops;
@@ -75,6 +76,8 @@ pub struct Env<'a> {
     pub shows_hidden: bool,
     /// Test hook: fail at this step number (rollback test).
     pub fail_at_step: Option<usize>,
+    /// Where generated `.ico` files go (`%LOCALAPPDATA%\Nook\icons`).
+    pub icons_dir: PathBuf,
 }
 
 impl Env<'_> {
@@ -104,6 +107,7 @@ impl Env<'_> {
             desktop: self.desktops.user.clone(),
             allowed_roots,
             shows_hidden: self.shows_hidden,
+            icons_enabled: self.config.icons.enabled,
             env,
         })
     }
@@ -465,7 +469,7 @@ fn execute(
         crate::winreg::broadcast_shell_settings();
     }
 
-    // 4. In-place actions first (rename, hide_caption, dim, folder_icon), then moves.
+    // 4. In-place actions first (rename, hide_caption, dim, icons), then moves.
     let (in_place, moves): (Vec<&Action>, Vec<&Action>) = sp
         .plan
         .actions
@@ -513,6 +517,26 @@ fn execute(
                     cur.insert(r, to);
                 }
             }
+            Action::Dim { value: true, .. }
+                if env.config.icons.enabled && styled_kind(&r, &by_id).is_some() =>
+            {
+                // Styled items dim via a muted icon (no Hidden attribute needed).
+                let kind = styled_kind(&r, &by_id).unwrap();
+                let shape = if in_projects(&sp.plan, &r) {
+                    Shape::Circle
+                } else {
+                    Shape::Squircle
+                };
+                restyle(
+                    run,
+                    &r,
+                    &path,
+                    kind,
+                    IconStyle::Muted,
+                    shape,
+                    &base_from(&r, &path, &by_id),
+                )?;
+            }
             Action::Dim { value, .. } => {
                 let old = get_attrs(&path)?;
                 let new = if *value {
@@ -535,6 +559,28 @@ fn execute(
                     },
                 )?;
             }
+            Action::RestyleIcon { style, .. } => {
+                let kind = styled_kind(&r, &by_id).context("item cannot be restyled")?;
+                let style = match style.as_str() {
+                    "orb" => IconStyle::Orb,
+                    "muted" => IconStyle::Muted,
+                    _ => IconStyle::Tile,
+                };
+                let shape = match style {
+                    IconStyle::Orb => Shape::Circle,
+                    IconStyle::Muted if in_projects(&sp.plan, &r) => Shape::Circle,
+                    _ => Shape::Squircle,
+                };
+                restyle(
+                    run,
+                    &r,
+                    &path,
+                    kind,
+                    style,
+                    shape,
+                    &base_from(&r, &path, &by_id),
+                )?;
+            }
             Action::FolderIcon { icon, .. } => {
                 let icon_res = if icon == "default" {
                     let sys = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
@@ -545,53 +591,7 @@ fn execute(
                         crate::paths::expand_env(icon, &env.desktops.user)?.display()
                     )
                 };
-                let ini = path.join("desktop.ini");
-                let existed = ini.exists();
-                let backup = existed.then(|| {
-                    run.park.join(format!(
-                        "desktop.ini.{}.bak",
-                        r.replace([':', '\\', '%'], "_")
-                    ))
-                });
-                let old_attrs = existed.then(|| get_attrs(&ini)).transpose()?;
-                let park = free_name(&run.park, "desktop.ini", &|p| p.exists());
-                let step = Step::WriteFile {
-                    path: ini.clone(),
-                    backup: backup.clone(),
-                    park,
-                    old_attrs,
-                };
-                let pk = run.park.clone();
-                run.step("folder_icon", Some(&r), step, || {
-                    std::fs::create_dir_all(&pk)?;
-                    if let Some(b) = &backup {
-                        // Keep the previous desktop.ini: move it aside (never delete).
-                        set_attrs(&ini, ATTR_NORMAL)?;
-                        move_path(&ini, b)?;
-                    }
-                    std::fs::write(&ini, desktop_ini(&icon_res))?;
-                    set_attrs(&ini, ATTR_HIDDEN | ATTR_SYSTEM)?;
-                    Ok(Outcome::Done)
-                })?;
-                let old = get_attrs(&path)?;
-                if old & (ATTR_READONLY | ATTR_SYSTEM) == 0 {
-                    // PathMakeSystemFolder equivalent: ReadOnly makes Explorer read desktop.ini.
-                    let new = old | ATTR_READONLY;
-                    run.step(
-                        "folder_icon",
-                        Some(&r),
-                        Step::SetAttrs {
-                            path: path.clone(),
-                            old,
-                            new,
-                        },
-                        || {
-                            set_attrs(&path, new)?;
-                            Ok(Outcome::Done)
-                        },
-                    )?;
-                }
-                notify_item(&path);
+                set_folder_icon(run, &r, &path, &icon_res)?;
             }
             Action::MoveToFolder { dest, .. } => {
                 let d = crate::paths::expand_env(dest, &env.desktops.user)?;
@@ -653,7 +653,7 @@ fn execute(
                     cur.remove(&r);
                 }
             }
-            Action::ExplorerSetting { .. } | Action::RestyleIcon { .. } => {}
+            Action::ExplorerSetting { .. } => {}
         }
         touched_dirs.insert(dir);
     }
@@ -814,6 +814,23 @@ fn revert(step: &Step, env: &Env) -> Result<String> {
                 }
             }
             notify_item(path.parent().unwrap());
+            Ok(String::new())
+        }
+        Step::ModifyFile { path, backup, park } => {
+            if !backup.exists() {
+                return Ok("no backup (step never ran)".into());
+            }
+            if path.exists() {
+                std::fs::create_dir_all(park.parent().unwrap())?;
+                let to = free_name(
+                    park.parent().unwrap(),
+                    &park.file_name().unwrap().to_string_lossy(),
+                    &|p| p.exists(),
+                );
+                move_path(path, &to)?;
+            }
+            move_path(backup, path)?;
+            notify_item(path);
             Ok(String::new())
         }
         Step::Registry {
@@ -1003,4 +1020,128 @@ pub fn set_state(id: &str, state: PlanState, store: &Store) -> Result<StoredPlan
     sp.state = state;
     store.save(&sp)?;
     Ok(sp)
+}
+
+/// Kind of a ref for icon styling: existing styleable item, or a `new:` folder.
+fn styled_kind(r: &str, by_id: &HashMap<&str, &Item>) -> Option<crate::scan::Kind> {
+    match by_id.get(r) {
+        Some(i) if crate::plan::validate::styleable(i.kind) && i.writable => Some(i.kind),
+        Some(_) => None,
+        None if r.starts_with(NEW_PREFIX) => Some(crate::scan::Kind::Folder),
+        None => None,
+    }
+}
+
+fn in_projects(plan: &PlanInput, r: &str) -> bool {
+    plan.layout.projects.iter().any(|e| e.item() == r)
+}
+
+/// Where the base picture for a styled icon comes from: a shortcut's target (its own icon may
+/// already be a Nook icon), otherwise the item itself.
+fn base_from(r: &str, path: &Path, by_id: &HashMap<&str, &Item>) -> String {
+    by_id
+        .get(r)
+        .and_then(|i| i.shortcut.as_ref())
+        .and_then(|s| s.target.clone())
+        .filter(|t| Path::new(t).exists())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// `desktop.ini` with `IconResource` + ReadOnly on the folder (PathMakeSystemFolder equivalent).
+fn set_folder_icon(run: &mut Run, r: &str, path: &Path, icon_res: &str) -> Result<()> {
+    let ini = path.join("desktop.ini");
+    let existed = ini.exists();
+    let backup = existed.then(|| free_name(&run.park, "desktop.ini.bak", &|p| p.exists()));
+    let old_attrs = existed.then(|| get_attrs(&ini)).transpose()?;
+    let park = free_name(&run.park, "desktop.ini", &|p| p.exists());
+    let step = Step::WriteFile {
+        path: ini.clone(),
+        backup: backup.clone(),
+        park,
+        old_attrs,
+    };
+    let pk = run.park.clone();
+    let res = icon_res.to_string();
+    run.step("folder_icon", Some(r), step, || {
+        std::fs::create_dir_all(&pk)?;
+        if let Some(b) = &backup {
+            // Keep the previous desktop.ini: move it aside (never delete).
+            set_attrs(&ini, ATTR_NORMAL)?;
+            move_path(&ini, b)?;
+        }
+        std::fs::write(&ini, desktop_ini(&res))?;
+        set_attrs(&ini, ATTR_HIDDEN | ATTR_SYSTEM)?;
+        Ok(Outcome::Done)
+    })?;
+    let old = get_attrs(path)?;
+    if old & (ATTR_READONLY | ATTR_SYSTEM) == 0 {
+        let new = old | ATTR_READONLY;
+        run.step(
+            "folder_icon",
+            Some(r),
+            Step::SetAttrs {
+                path: path.to_path_buf(),
+                old,
+                new,
+            },
+            || {
+                set_attrs(path, new)?;
+                Ok(Outcome::Done)
+            },
+        )?;
+    }
+    notify_item(path);
+    Ok(())
+}
+
+/// Generates the styled `.ico` and assigns it (spec §5.4).
+fn restyle(
+    run: &mut Run,
+    r: &str,
+    path: &Path,
+    kind: crate::scan::Kind,
+    style: IconStyle,
+    shape: Shape,
+    base: &str,
+) -> Result<()> {
+    let accent = crate::preview::render::parse_hex(&run.env.config.icons.accent);
+    let ico = crate::icons::make(&run.env.icons_dir, base, style, shape, accent)?;
+    match kind {
+        crate::scan::Kind::Folder => set_folder_icon(run, r, path, &format!("{},0", ico.display())),
+        _ => {
+            let backup = free_name(
+                &run.park,
+                &format!("{}.bak", path.file_name().unwrap().to_string_lossy()),
+                &|p| p.exists(),
+            );
+            let park = free_name(
+                &run.park,
+                &path.file_name().unwrap().to_string_lossy(),
+                &|p| p.exists(),
+            );
+            let step = Step::ModifyFile {
+                path: path.to_path_buf(),
+                backup: backup.clone(),
+                park,
+            };
+            let pk = run.park.clone();
+            run.step("restyle_icon", Some(r), step, || {
+                std::fs::create_dir_all(&pk)?;
+                // Keep the original bytes; undo puts them back.
+                std::fs::copy(path, &backup)?;
+                if kind == crate::scan::Kind::Url {
+                    let text = std::fs::read(path)?;
+                    std::fs::write(
+                        path,
+                        crate::shell::shortcuts::set_url_icon(&text, &ico.to_string_lossy()),
+                    )?;
+                } else {
+                    crate::shell::shortcuts::set_lnk_icon(path, &ico)?;
+                }
+                notify_item(path);
+                Ok(Outcome::Done)
+            })?;
+            Ok(())
+        }
+    }
 }

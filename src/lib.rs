@@ -5,6 +5,7 @@ pub mod config;
 pub mod daemon;
 pub mod doctor;
 pub mod fsutil;
+pub mod icons;
 pub mod intel;
 pub mod ipc;
 pub mod layout;

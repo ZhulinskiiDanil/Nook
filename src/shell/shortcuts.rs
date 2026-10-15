@@ -86,6 +86,68 @@ pub fn read_lnk(path: &Path) -> Result<LinkInfo> {
     }
 }
 
+/// Points a `.lnk` at a new icon (`SetIconLocation` + save). Requires COM.
+pub fn set_lnk_icon(path: &Path, ico: &Path) -> Result<()> {
+    use windows::Win32::System::Com::STGM_READWRITE;
+    // SAFETY: COM objects owned locally.
+    unsafe {
+        let link: IShellLinkW =
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).context("ShellLink")?;
+        let pf: IPersistFile = link.cast()?;
+        let p = HSTRING::from(path.as_os_str());
+        pf.Load(&p, STGM_READWRITE).context("IPersistFile::Load")?;
+        link.SetIconLocation(&HSTRING::from(ico.as_os_str()), 0)
+            .context("SetIconLocation")?;
+        pf.Save(&p, true).context("IPersistFile::Save")?;
+    }
+    Ok(())
+}
+
+/// `.url` text with `IconFile`/`IconIndex` set in `[InternetShortcut]` (other lines kept).
+pub fn set_url_icon(bytes: &[u8], ico: &str) -> Vec<u8> {
+    let text = decode_prefix(bytes, 1 << 20)
+        .map(|(t, _)| t)
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    let mut in_section = false;
+    let mut done = false;
+    let flush = |out: &mut Vec<String>, done: &mut bool| {
+        if !*done {
+            out.push(format!("IconFile={ico}"));
+            out.push("IconIndex=0".into());
+            *done = true;
+        }
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            if in_section {
+                flush(&mut out, &mut done);
+            }
+            in_section = t.eq_ignore_ascii_case("[InternetShortcut]");
+            out.push(line.to_string());
+            continue;
+        }
+        if in_section
+            && let Some((k, _)) = t.split_once('=')
+            && (k.trim().eq_ignore_ascii_case("IconFile")
+                || k.trim().eq_ignore_ascii_case("IconIndex"))
+        {
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if in_section {
+        flush(&mut out, &mut done);
+    } else if !done {
+        out.push("[InternetShortcut]".into());
+        flush(&mut out, &mut done);
+    }
+    let mut s = out.join("\r\n");
+    s.push_str("\r\n");
+    s.into_bytes()
+}
+
 /// Parses `.url` content: `[InternetShortcut]` → `URL=...`.
 pub fn parse_url_file(bytes: &[u8]) -> Option<String> {
     let (text, _) = decode_prefix(bytes, 64 * 1024)?;
@@ -142,6 +204,22 @@ mod tests {
         );
         assert_eq!(parse_url_file(b"[Other]\nURL=x\n"), None);
         assert_eq!(parse_url_file(b"\x00\x01\x02\x03\x04\x05\x06\x07"), None);
+    }
+
+    #[test]
+    fn url_icon_is_replaced_and_url_kept() {
+        let src = b"[{000214A0-0000-0000-C000-000000000046}]\r\nProp3=19,0\r\n[InternetShortcut]\r\nURL=steam://rungameid/322170\r\nIconFile=C:\\Steam\\icon.ico\r\nIconIndex=3\r\n";
+        let out = String::from_utf8(set_url_icon(src, r"C:\N\a.ico")).unwrap();
+        assert!(
+            out.contains("IconFile=C:\\N\\a.ico\r\nIconIndex=0"),
+            "{out}"
+        );
+        assert_eq!(out.matches("IconFile").count(), 1);
+        assert!(out.contains("Prop3=19,0"));
+        assert_eq!(
+            parse_url_file(out.as_bytes()).as_deref(),
+            Some("steam://rungameid/322170")
+        );
     }
 
     #[test]

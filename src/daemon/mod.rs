@@ -68,6 +68,7 @@ impl State {
             desk: desk.as_ref(),
             shows_hidden: crate::shell::explorer_settings::ExplorerSettings::read().shows_hidden(),
             fail_at_step: None,
+            icons_dir: self.data_dir.join("icons"),
         };
         f(&env)
     }

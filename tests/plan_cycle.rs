@@ -56,6 +56,7 @@ impl Sb {
             desk: &NoDesk,
             shows_hidden: true,
             fail_at_step: None,
+            icons_dir: self._tmp.path().join("icons"),
         }
     }
 
@@ -153,9 +154,11 @@ fn propose_apply_undo_restores_everything() {
     );
     assert!(d.join("\u{2800}.url").is_file(), "caption hidden");
     assert!(d.join("Dev").join("desktop.ini").is_file());
-    assert!(
-        nook::plan::fsops::get_attrs(&d.join("Dev")).unwrap() & 0x2 != 0,
-        "dimmed"
+    // Dim on a folder with icon styles on = muted icon via desktop.ini, not the Hidden attribute.
+    assert_eq!(
+        nook::plan::fsops::get_attrs(&d.join("Dev")).unwrap() & 0x2,
+        0,
+        "not hidden"
     );
     assert!(
         done.results
@@ -183,6 +186,62 @@ fn propose_apply_undo_restores_everything() {
             .join("Art")
             .is_dir()
     );
+}
+
+#[test]
+fn icon_styles_apply_and_undo_exactly() {
+    let _com = ComApartment::sta().unwrap();
+    let sb = Sb::new();
+    let before = sb.state();
+    let s = sb.scan();
+    let mut plan = sb.plan(&s);
+    plan.actions.retain(|a| {
+        !matches!(
+            a,
+            nook::plan::model::Action::Dim { .. } | nook::plan::model::Action::FolderIcon { .. }
+        )
+    });
+    let id = |n: &str| sb.id(&s, n);
+    plan.actions.extend(
+        serde_json::from_value::<Vec<nook::plan::model::Action>>(serde_json::json!([
+            { "op": "restyle_icon", "item": id("Steam.url"), "style": "tile", "reason": "apps" },
+            { "op": "restyle_icon", "item": "new:%DESKTOP%\\Art", "style": "orb", "reason": "projects" },
+            { "op": "dim", "item": id("Dev"), "value": true, "reason": "inactive" }
+        ]))
+        .unwrap(),
+    );
+    let p = apply::propose(plan, &s, &sb.env()).unwrap().expect("valid");
+    let done = apply::apply(&p.plan_id, &sb.scan(), &sb.env()).unwrap();
+    assert_eq!(done.state, PlanState::Applied, "{:#?}", done.results);
+
+    let url = std::fs::read_to_string(sb.desk.user.join("\u{2800}.url")).unwrap();
+    assert!(
+        url.contains("IconFile=") && url.contains("steam://open/main"),
+        "{url}"
+    );
+    let art_ini = std::fs::read(sb.desk.user.join("Art").join("desktop.ini")).unwrap();
+    assert!(
+        String::from_utf16_lossy(
+            &art_ini[2..]
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>()
+        )
+        .contains(".ico,0")
+    );
+    // Dim on a styled folder: muted icon, no Hidden attribute.
+    assert_eq!(
+        nook::plan::fsops::get_attrs(&sb.desk.user.join("Dev")).unwrap() & 0x2,
+        0
+    );
+    assert!(sb.desk.user.join("Dev").join("desktop.ini").is_file());
+    let icos = std::fs::read_dir(sb._tmp.path().join("icons"))
+        .unwrap()
+        .count();
+    assert_eq!(icos, 3, "tile, orb, muted");
+
+    apply::undo(None, &sb.env()).unwrap();
+    assert_eq!(sb.state(), before);
 }
 
 #[test]

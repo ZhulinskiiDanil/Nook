@@ -26,14 +26,55 @@ pub fn shell_image(path: &Path, max: i32) -> Result<Rgba> {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None)
                 .context("SHCreateItemFromParsingName")?;
-        let hbm = factory
-            .GetImage(
-                SIZE { cx: max, cy: max },
-                SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK,
-            )
-            .context("IShellItemImageFactory::GetImage")?;
+        let hbm = get_image_retrying(
+            &factory,
+            SIZE { cx: max, cy: max },
+            SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK,
+        )?;
         hbitmap_to_rgba(hbm)
     }
+}
+
+/// Shell *icon* (never a thumbnail) for a path or `::{CLSID}` at `size` px. Requires COM.
+pub fn shell_icon_rgba(parsing: &str, size: i32) -> Result<Rgba> {
+    use windows::Win32::UI::Shell::SIIGBF_ICONONLY;
+    // SAFETY: COM call; the bitmap is freed in hbitmap_to_rgba.
+    unsafe {
+        let factory: IShellItemImageFactory =
+            SHCreateItemFromParsingName(&HSTRING::from(parsing), None)
+                .with_context(|| format!("SHCreateItemFromParsingName {parsing}"))?;
+        let hbm = get_image_retrying(
+            &factory,
+            SIZE { cx: size, cy: size },
+            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+        )?;
+        hbitmap_to_rgba(hbm)
+    }
+}
+
+/// `GetImage` may answer E_PENDING while the shell's icon cache is still extracting; retry briefly.
+fn get_image_retrying(
+    f: &IShellItemImageFactory,
+    size: SIZE,
+    flags: windows::Win32::UI::Shell::SIIGBF,
+) -> Result<windows::Win32::Graphics::Gdi::HBITMAP> {
+    const E_PENDING: windows::core::HRESULT = windows::core::HRESULT(0x8000_000Au32 as i32);
+    let mut last = None;
+    for _ in 0..40 {
+        // SAFETY: plain COM call.
+        match unsafe { f.GetImage(size, flags) } {
+            Ok(h) => return Ok(h),
+            Err(e) if e.code() == E_PENDING => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e).context("IShellItemImageFactory::GetImage"));
+            }
+        }
+    }
+    Err(anyhow::Error::from(last.unwrap())
+        .context("IShellItemImageFactory::GetImage: still pending after 1 s"))
 }
 
 /// Converts (and frees) a shell HBITMAP to straight RGBA.
