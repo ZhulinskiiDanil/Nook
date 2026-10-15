@@ -4,7 +4,12 @@
 pub mod config;
 pub mod doctor;
 pub mod fsutil;
+pub mod intel;
 pub mod logging;
 pub mod paths;
 pub mod platform;
+pub mod sandbox;
+pub mod scan;
 pub mod shell;
+pub mod timefmt;
+pub mod winreg;

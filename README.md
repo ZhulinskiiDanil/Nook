@@ -8,7 +8,7 @@ Spec: [TASK.md](TASK.md) · wireframe: [docs/wireframe.svg](docs/wireframe.svg)
 ## Status
 
 - [x] M0 — skeleton, config, logging, DPI, single instance, `nookctl doctor`
-- [ ] M1 — scan & peek (read-only)
+- [x] M1 — scan & peek (read-only), `dump`, `sandbox init`
 - [ ] M2 — daemon & MCP (read-only)
 - [ ] M3 — layout
 - [ ] M4 — plans, journal, quarantine, undo

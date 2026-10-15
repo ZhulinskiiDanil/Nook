@@ -5,12 +5,14 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, IServiceProvider};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::{
     CSIDL_DESKTOP, FOLDERFLAGS, FOLDERVIEWMODE, FVM_ICON, FWF_AUTOARRANGE, FWF_NOICONS,
-    FWF_SNAPTOGRID, IFolderView2, IShellBrowser, IShellWindows, SID_STopLevelBrowser,
-    SVGIO_ALLVIEW, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows,
+    FWF_SNAPTOGRID, IFolderView2, ILFree, IShellBrowser, IShellItem, IShellWindows,
+    SID_STopLevelBrowser, SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
+    SIGDN_NORMALDISPLAY, SVGIO_ALLVIEW, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows,
 };
 use windows::core::Interface;
 
@@ -73,6 +75,77 @@ impl DesktopView {
             })
         }
     }
+}
+
+/// One item as the desktop view sees it. Read-only snapshot.
+#[derive(Debug, Clone)]
+pub struct ViewItem {
+    /// Filesystem path, or `::{CLSID}` for virtual items.
+    pub parsing: String,
+    pub is_filesystem: bool,
+    pub display: String,
+    /// Position in view client coordinates.
+    pub x: i32,
+    pub y: i32,
+}
+
+fn display_name(item: &IShellItem, sigdn: SIGDN) -> Option<String> {
+    // SAFETY: returned string freed with CoTaskMemFree.
+    unsafe {
+        let p = item.GetDisplayName(sigdn).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s
+    }
+}
+
+impl DesktopView {
+    /// Names and positions of all items in the view. Never moves anything.
+    pub fn items(&self) -> Result<Vec<ViewItem>> {
+        let mut out = Vec::new();
+        // SAFETY: PIDLs returned by Item() are freed with ILFree.
+        unsafe {
+            let n = self.view.ItemCount(SVGIO_ALLVIEW).context("ItemCount")?;
+            for i in 0..n {
+                let Ok(item) = self.view.GetItem::<IShellItem>(i) else {
+                    continue;
+                };
+                let (parsing, is_filesystem) = match display_name(&item, SIGDN_FILESYSPATH) {
+                    Some(p) => (p, true),
+                    None => match display_name(&item, SIGDN_DESKTOPABSOLUTEPARSING) {
+                        Some(p) => (p, false),
+                        None => continue,
+                    },
+                };
+                let display = display_name(&item, SIGDN_NORMALDISPLAY).unwrap_or_default();
+                let Ok(pidl) = self.view.Item(i) else {
+                    continue;
+                };
+                let pos = self.view.GetItemPosition(pidl);
+                ILFree(Some(pidl));
+                let Ok(pt) = pos else { continue };
+                out.push(ViewItem {
+                    parsing,
+                    is_filesystem,
+                    display,
+                    x: pt.x,
+                    y: pt.y,
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// View position → grid cell (nearest slot).
+pub fn cell_of(x: i32, y: i32, step_x: i32, step_y: i32) -> (i32, i32) {
+    if step_x <= 0 || step_y <= 0 {
+        return (0, 0);
+    }
+    (
+        (x + step_x / 2).div_euclid(step_x),
+        (y + step_y / 2).div_euclid(step_y),
+    )
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
