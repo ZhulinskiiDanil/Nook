@@ -86,6 +86,17 @@ enum Command {
         #[arg(long, hide = true)]
         report: Option<PathBuf>,
     },
+    /// Shortcut arrow overlay: `off` hides it system-wide, `on` restores (UAC; restarts Explorer).
+    ShortcutArrows {
+        #[arg(value_parser = ["off", "on"])]
+        state: String,
+        #[arg(long, hide = true)]
+        elevated: bool,
+        #[arg(long, hide = true)]
+        record: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        report: Option<PathBuf>,
+    },
     /// Re-lay the desktop by the plan currently in effect, on the current grid.
     Relayout,
     /// Undo the last applied plan, or the given one.
@@ -325,6 +336,39 @@ fn main() -> Result<()> {
         Command::Apply { plan_id } => ipc("apply_plan", serde_json::json!({ "id": plan_id }))?,
         Command::Undo { plan_id } => ipc("undo", serde_json::json!({ "plan_id": plan_id }))?,
         Command::Relayout => ipc("relayout", serde_json::Value::Null)?,
+        Command::ShortcutArrows {
+            state,
+            elevated,
+            record,
+            report,
+        } => {
+            let off = state == "off";
+            if elevated {
+                let (record, report) = (record.context("--record")?, report.context("--report")?);
+                let r = nook::arrows::apply(off, &record);
+                std::fs::write(
+                    &report,
+                    r.as_ref()
+                        .map_or_else(|e| format!("ERROR: {e:#}"), |s| s.clone()),
+                )?;
+                std::process::exit(if r.is_ok() { 0 } else { 2 });
+            }
+            let record = dirs.data_dir.join("arrows.json");
+            let report = dirs.data_dir.join("arrows-report.txt");
+            let args = format!(
+                "shortcut-arrows {state} --elevated --record \"{}\" --report \"{}\"",
+                record.display(),
+                report.display()
+            );
+            println!("Asking for administrator rights (UAC)…");
+            let code = nook::adopt::run_elevated(&args)?;
+            println!("{}", std::fs::read_to_string(&report).unwrap_or_default());
+            if code != 0 {
+                bail!("elevated step failed (exit code {code})");
+            }
+            println!("Restarting Explorer to apply…");
+            nook::arrows::restart_explorer()?;
+        }
         Command::AdoptPublic {
             names,
             undo,

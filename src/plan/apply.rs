@@ -520,22 +520,11 @@ fn execute(
             Action::Dim { value: true, .. }
                 if env.config.icons.enabled && styled_kind(&r, &by_id).is_some() =>
             {
-                // Styled items dim via a muted icon (no Hidden attribute needed).
+                // Styled items dim via their icon (no Hidden attribute needed).
                 let kind = styled_kind(&r, &by_id).unwrap();
-                let shape = if in_projects(&sp.plan, &r) {
-                    Shape::Circle
-                } else {
-                    Shape::Squircle
-                };
-                restyle(
-                    run,
-                    &r,
-                    &path,
-                    kind,
-                    IconStyle::Muted,
-                    shape,
-                    &base_from(&r, &path, &by_id),
-                )?;
+                let look = look_for(&sp.plan, &r, a, env.config).context("no style")?;
+                let base = base_from(&r, &path, kind, &by_id, &run.env.store.journal);
+                restyle(run, &r, &path, kind, look, &base)?;
             }
             Action::Dim { value, .. } => {
                 let old = get_attrs(&path)?;
@@ -559,27 +548,11 @@ fn execute(
                     },
                 )?;
             }
-            Action::RestyleIcon { style, .. } => {
+            Action::RestyleIcon { .. } => {
                 let kind = styled_kind(&r, &by_id).context("item cannot be restyled")?;
-                let style = match style.as_str() {
-                    "orb" => IconStyle::Orb,
-                    "muted" => IconStyle::Muted,
-                    _ => IconStyle::Tile,
-                };
-                let shape = match style {
-                    IconStyle::Orb => Shape::Circle,
-                    IconStyle::Muted if in_projects(&sp.plan, &r) => Shape::Circle,
-                    _ => Shape::Squircle,
-                };
-                restyle(
-                    run,
-                    &r,
-                    &path,
-                    kind,
-                    style,
-                    shape,
-                    &base_from(&r, &path, &by_id),
-                )?;
+                let look = look_for(&sp.plan, &r, a, env.config).context("unknown style")?;
+                let base = base_from(&r, &path, kind, &by_id, &run.env.store.journal);
+                restyle(run, &r, &path, kind, look, &base)?;
             }
             Action::FolderIcon { icon, .. } => {
                 let icon_res = if icon == "default" {
@@ -1055,15 +1028,108 @@ fn in_projects(plan: &PlanInput, r: &str) -> bool {
     plan.layout.projects.iter().any(|e| e.item() == r)
 }
 
-/// Where the base picture for a styled icon comes from: a shortcut's target (its own icon may
-/// already be a Nook icon), otherwise the item itself.
-fn base_from(r: &str, path: &Path, by_id: &HashMap<&str, &Item>) -> String {
-    by_id
-        .get(r)
-        .and_then(|i| i.shortcut.as_ref())
-        .and_then(|s| s.target.clone())
-        .filter(|t| Path::new(t).exists())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+/// How an item should look (spec §5.4).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Look {
+    pub style: IconStyle,
+    pub shape: Shape,
+    /// Baked-in opacity (dimmed projects keep their tint at 50 %).
+    pub opacity: f32,
+}
+
+/// Style for a `restyle_icon` or styled `dim` action on ref `r`.
+pub fn look_for(plan: &PlanInput, r: &str, a: &Action, config: &Config) -> Option<Look> {
+    let projects = in_projects(plan, r);
+    let (style, opacity) = match a {
+        Action::RestyleIcon { style, .. } => (IconStyle::parse(style)?, 1.0),
+        // A dimmed project keeps the project look, half transparent; others go muted.
+        Action::Dim { value: true, .. } if projects => (config.icons.projects, 0.5),
+        Action::Dim { value: true, .. } => (config.icons.dim, 1.0),
+        _ => return None,
+    };
+    let shape = if style == IconStyle::Orb {
+        Shape::Circle
+    } else {
+        Shape::Squircle
+    };
+    Some(Look {
+        style,
+        shape,
+        opacity,
+    })
+}
+
+/// Where the base picture comes from — always the *original* art, never an icon Nook made:
+/// folders → the stock folder icon (projects share one look); shortcuts → their target's icon;
+/// a `.url` already pointing at a Nook icon → its pre-Nook copy from a plan journal backup.
+pub fn base_from(
+    r: &str,
+    path: &Path,
+    kind: crate::scan::Kind,
+    by_id: &HashMap<&str, &Item>,
+    journal_dir: &Path,
+) -> String {
+    let _ = (r, by_id);
+    if kind == crate::scan::Kind::Folder {
+        return std::env::temp_dir().to_string_lossy().into_owned();
+    }
+    // The shortcut itself carries its real icon (custom game icons, browser profiles…), unless
+    // Nook already pointed it at one of its own icons: then use the pre-Nook copy.
+    let me = path.to_string_lossy().into_owned();
+    if !std::fs::read(path).is_ok_and(|b| refers_to_nook_icon(&b)) {
+        return me;
+    }
+    original_backup(path, journal_dir)
+        .and_then(|b| {
+            // The shell needs the real extension to read the icon.
+            let tmp = std::env::temp_dir()
+                .join(format!("nook-orig-{}", path.file_name()?.to_string_lossy()));
+            std::fs::copy(&b, &tmp).ok()?;
+            Some(tmp.to_string_lossy().into_owned())
+        })
+        .unwrap_or(me)
+}
+
+/// Shortcut bytes reference `…\Nook\icons\…` (`.url` is text, `.lnk` stores UTF-16).
+pub fn refers_to_nook_icon(bytes: &[u8]) -> bool {
+    let needle = r"\nook\icons\";
+    if String::from_utf8_lossy(bytes)
+        .to_lowercase()
+        .contains(needle)
+    {
+        return true;
+    }
+    let decode = |b: &[u8]| -> String {
+        let w: Vec<u16> = b
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&w).to_lowercase()
+    };
+    decode(bytes).contains(needle) || bytes.get(1..).is_some_and(|b| decode(b).contains(needle))
+}
+
+/// A journaled pre-change copy of `path` that does not itself point at a Nook icon.
+fn original_backup(path: &Path, journal_dir: &Path) -> Option<PathBuf> {
+    let want = path.to_string_lossy().to_lowercase();
+    for e in std::fs::read_dir(journal_dir).ok()?.flatten() {
+        let Ok(lines) = journal::read(&e.path()) else {
+            continue;
+        };
+        for l in lines {
+            if let Step::ModifyFile {
+                path: p, backup, ..
+            } = l.step
+                && p.to_string_lossy().to_lowercase() == want
+                && std::fs::read(&backup).is_ok_and(|b| !refers_to_nook_icon(&b))
+            {
+                return Some(backup);
+            }
+        }
+    }
+    None
 }
 
 /// `desktop.ini` with `IconResource` + ReadOnly on the folder (PathMakeSystemFolder equivalent).
@@ -1119,12 +1185,18 @@ fn restyle(
     r: &str,
     path: &Path,
     kind: crate::scan::Kind,
-    style: IconStyle,
-    shape: Shape,
+    look: Look,
     base: &str,
 ) -> Result<()> {
     let accent = crate::preview::render::parse_hex(&run.env.config.icons.accent);
-    let ico = crate::icons::make(&run.env.icons_dir, base, style, shape, accent)?;
+    let ico = crate::icons::make(
+        &run.env.icons_dir,
+        base,
+        look.style,
+        look.shape,
+        accent,
+        look.opacity,
+    )?;
     match kind {
         crate::scan::Kind::Folder => set_folder_icon(run, r, path, &format!("{},0", ico.display())),
         _ => {
@@ -1162,5 +1234,29 @@ fn restyle(
             })?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refers_to_nook_icon;
+
+    #[test]
+    fn detects_nook_icon_in_url_and_lnk() {
+        let url = r"[InternetShortcut]
+IconFile=C:\Users\X\AppData\Local\Nook\icons\ab.ico";
+        assert!(refers_to_nook_icon(url.as_bytes()));
+        let lnk: Vec<u8> = "\u{1}\u{2}"
+            .encode_utf16()
+            .chain(r"C:\Users\X\AppData\Local\Nook\icons\ab.ico".encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(refers_to_nook_icon(&lnk));
+        let mut shifted = vec![0u8];
+        shifted.extend(&lnk);
+        assert!(refers_to_nook_icon(&shifted), "odd byte offset");
+        assert!(!refers_to_nook_icon(
+            r"IconFile=C:\Steam\game.ico".as_bytes()
+        ));
     }
 }

@@ -306,8 +306,11 @@ pub fn validate(plan: &PlanInput, ctx: &Ctx) -> Result<Checked, Vec<String>> {
                         "{at}: icon styles are disabled in config ([icons] enabled = false)"
                     ));
                 }
-                if !matches!(style.as_str(), "tile" | "orb" | "muted") {
-                    errors.push(format!("{at}: style must be tile, orb or muted"));
+                if !matches!(crate::config::IconStyle::parse(style), Some(s) if s != crate::config::IconStyle::None)
+                {
+                    errors.push(format!(
+                        "{at}: style must be lifted, tint, muted, tile or orb"
+                    ));
                 }
                 if let Some(i) = item {
                     need_writable(&mut errors);

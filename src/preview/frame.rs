@@ -188,49 +188,35 @@ pub fn build(
 }
 
 /// Styled icon per item path (lowercase) for every restyle/dim the plan makes; key `"new:"`
-/// holds the style for folders the plan creates. Best effort: failures fall back to the stock icon.
+/// holds the look for folders the plan creates. Same choices as apply (`look_for`, `base_from`),
+/// so the preview shows exactly what the desktop will get. Best effort.
 fn styled_icons(
     scan: &ScanResult,
     sp: &StoredPlan,
     config: &Config,
 ) -> HashMap<String, Arc<Pixmap>> {
-    use crate::config::IconStyle;
-    use crate::icons::Shape;
-    use crate::plan::model::{Action, NEW_PREFIX};
+    use crate::plan::apply::{base_from, look_for};
+    use crate::plan::model::NEW_PREFIX;
     let mut out = HashMap::new();
     if !config.icons.enabled {
         return out;
     }
     let accent = render::parse_hex(&config.icons.accent);
-    let in_projects = |r: &str| sp.plan.layout.projects.iter().any(|e| e.item() == r);
+    let journal = crate::paths::AppDirs::resolve()
+        .map(|d| d.data_dir.join("journal"))
+        .unwrap_or_default();
     let by_id: HashMap<&str, &crate::scan::Item> =
         scan.items.iter().map(|i| (i.id.as_str(), i)).collect();
     for a in &sp.plan.actions {
         let Some(r) = a.item() else { continue };
-        let style = match a {
-            Action::RestyleIcon { style, .. } => match style.as_str() {
-                "orb" => IconStyle::Orb,
-                "muted" => IconStyle::Muted,
-                _ => IconStyle::Tile,
-            },
-            Action::Dim { value: true, .. } => IconStyle::Muted,
-            _ => continue,
-        };
-        let shape = if style == IconStyle::Orb || (style == IconStyle::Muted && in_projects(r)) {
-            Shape::Circle
-        } else {
-            Shape::Squircle
+        let Some(look) = look_for(&sp.plan, r, a, config) else {
+            continue;
         };
         let (key, base) = match by_id.get(r) {
-            Some(i) if crate::plan::validate::styleable(i.kind) && i.writable => {
-                let base = i
-                    .shortcut
-                    .as_ref()
-                    .and_then(|s| s.target.clone())
-                    .filter(|t| std::path::Path::new(t).exists())
-                    .unwrap_or_else(|| i.path.clone());
-                (i.path.to_lowercase(), base)
-            }
+            Some(i) if crate::plan::validate::styleable(i.kind) && i.writable => (
+                i.path.to_lowercase(),
+                base_from(r, std::path::Path::new(&i.path), i.kind, &by_id, &journal),
+            ),
             None if r.starts_with(NEW_PREFIX) => (
                 "new:".to_string(),
                 std::env::temp_dir().to_string_lossy().into_owned(),
@@ -239,10 +225,11 @@ fn styled_icons(
         };
         match crate::icons::base_icon(&base) {
             Ok(b) => {
-                out.insert(
-                    key,
-                    Arc::new(crate::icons::render(style, shape, &b, accent)),
-                );
+                let mut pm = crate::icons::render(look.style, look.shape, &b, accent);
+                if look.opacity < 1.0 {
+                    pm = crate::icons::faded(&pm, look.opacity);
+                }
+                out.insert(key, Arc::new(pm));
             }
             Err(e) => tracing::debug!("preview style for {r}: {e:#}"),
         }

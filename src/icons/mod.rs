@@ -106,8 +106,98 @@ fn draw_centered(dst: &mut Pixmap, src: &Pixmap, size: f32) {
     );
 }
 
+/// Recolors to the accent hue but keeps the icon's own shading (a light tint, not flat).
+pub fn tint(src: &Pixmap, accent: Color) -> Pixmap {
+    let mut out = src.clone();
+    let (ar, ag, ab) = (accent.red(), accent.green(), accent.blue());
+    for px in out.pixels_mut() {
+        let c = px.demultiply();
+        let l = (0.299 * f32::from(c.red())
+            + 0.587 * f32::from(c.green())
+            + 0.114 * f32::from(c.blue()))
+            / 255.0;
+        let ch = |a: f32| ((a * (0.35 + 0.75 * l)).min(1.0) * 255.0) as u8;
+        *px = tiny_skia::ColorU8::from_rgba(ch(ar), ch(ag), ch(ab), c.alpha()).premultiply();
+    }
+    out
+}
+
+/// Multiplies opacity into the pixels (premultiplied stays premultiplied).
+pub fn faded(src: &Pixmap, opacity: f32) -> Pixmap {
+    let mut out = Pixmap::new(src.width(), src.height()).unwrap();
+    let p = PixmapPaint {
+        opacity,
+        ..Default::default()
+    };
+    out.draw_pixmap(0, 0, src.as_ref(), &p, Transform::identity(), None);
+    out
+}
+
+/// Separable box blur of the alpha channel, run twice (≈ gaussian). Returns alpha only.
+fn blur_alpha(src: &Pixmap, r: usize) -> Vec<u8> {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let mut a: Vec<u32> = src.pixels().iter().map(|p| u32::from(p.alpha())).collect();
+    let mut tmp = vec![0u32; w * h];
+    let n = (2 * r + 1) as u32;
+    for _ in 0..2 {
+        for y in 0..h {
+            for x in 0..w {
+                let (lo, hi) = (x.saturating_sub(r), (x + r).min(w - 1));
+                tmp[y * w + x] = (lo..=hi).map(|i| a[y * w + i]).sum::<u32>() / n;
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let (lo, hi) = (y.saturating_sub(r), (y + r).min(h - 1));
+                a[y * w + x] = (lo..=hi).map(|i| tmp[i * w + x]).sum::<u32>() / n;
+            }
+        }
+    }
+    a.into_iter().map(|v| v.min(255) as u8).collect()
+}
+
+/// Full-size glyph on a transparent 256 master (no plate).
+fn full(src: &Pixmap, k: f32) -> Pixmap {
+    let mut pm = Pixmap::new(BASE as u32, BASE as u32).unwrap();
+    draw_centered(&mut pm, src, BASE * k);
+    pm
+}
+
+/// Original icon with a soft drop shadow under it.
+fn lifted(base: &Pixmap) -> Pixmap {
+    let k = 0.90; // leave a little room for the shadow
+    let glyph = full(base, k);
+    let shadow_a = blur_alpha(&glyph, 7);
+    let mut pm = Pixmap::new(BASE as u32, BASE as u32).unwrap();
+    let dy = (BASE * 0.03) as usize;
+    let w = BASE as usize;
+    for (i, px) in pm.pixels_mut().iter_mut().enumerate() {
+        let (x, y) = (i % w, i / w);
+        if y < dy {
+            continue;
+        }
+        let a = (f32::from(shadow_a[(y - dy) * w + x]) * 0.55) as u8;
+        *px = tiny_skia::ColorU8::from_rgba(0, 0, 0, a).premultiply();
+    }
+    pm.draw_pixmap(
+        0,
+        0,
+        glyph.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    pm
+}
+
 /// Renders the 256 px master for a style. `base` is the item's own icon (any size, ~256 ideal).
 pub fn render(style: IconStyle, shape: Shape, base: &Pixmap, accent: Color) -> Pixmap {
+    match style {
+        IconStyle::Lifted => return lifted(base),
+        IconStyle::Tint => return full(&tint(base, accent), 1.0),
+        IconStyle::Muted => return full(&muted(base, accent), 1.0),
+        _ => {}
+    }
     let mut pm = Pixmap::new(BASE as u32, BASE as u32).unwrap();
     let path = shape_path(shape);
     let mut fill = Paint {
@@ -139,15 +229,7 @@ pub fn render(style: IconStyle, shape: Shape, base: &Pixmap, accent: Color) -> P
             rim.set_color(Color::from_rgba8(255, 255, 255, 90));
             base.clone()
         }
-        IconStyle::Muted => {
-            let mut a = accent;
-            a.set_alpha(0.30);
-            fill.set_color(a);
-            let mut ar = accent;
-            ar.set_alpha(0.60);
-            rim.set_color(ar);
-            muted(base, accent)
-        }
+        IconStyle::Muted | IconStyle::Lifted | IconStyle::Tint => unreachable!("handled above"),
         IconStyle::None => return base.clone(),
     };
     pm.fill_path(&path, &fill, FillRule::Winding, Transform::identity(), None);
@@ -212,7 +294,15 @@ pub fn store(dir: &Path, ico: &[u8]) -> Result<PathBuf> {
 
 /// Shell image of `parsing` at 256 px as a premultiplied pixmap. Requires COM.
 pub fn base_icon(parsing: &str) -> Result<Pixmap> {
-    let rgba = crate::shell::thumbs::shell_icon_rgba(parsing, 256)?;
+    let mut rgba = crate::shell::thumbs::shell_icon_rgba(parsing, 256)?;
+    // Apps without a 256 px icon come back as a tiny icon framed in a 256 tile. Then the
+    // honest 48 px version is the better source (desktop icons are 32–48 px anyway).
+    let opaque = rgba.pixels.as_chunks::<4>().0.iter().filter(|p| p[3] > 128).count();
+    if (opaque as f32) < (rgba.width * rgba.height) as f32 * 0.06
+        && let Ok(small) = crate::shell::thumbs::shell_icon_rgba(parsing, 48)
+    {
+        rgba = small;
+    }
     let mut data = rgba.pixels;
     for p in data.as_chunks_mut::<4>().0 {
         let a = u16::from(p[3]);
@@ -234,9 +324,13 @@ pub fn make(
     style: IconStyle,
     shape: Shape,
     accent: Color,
+    opacity: f32,
 ) -> Result<PathBuf> {
     let base = base_icon(base_from)?;
-    let master = render(style, shape, &base, accent);
+    let mut master = render(style, shape, &base, accent);
+    if opacity < 1.0 {
+        master = faded(&master, opacity);
+    }
     store(icons_dir, &ico_bytes(&master)?)
 }
 

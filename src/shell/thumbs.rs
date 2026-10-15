@@ -37,7 +37,7 @@ pub fn shell_image(path: &Path, max: i32) -> Result<Rgba> {
 
 /// Shell *icon* (never a thumbnail) for a path or `::{CLSID}` at `size` px. Requires COM.
 pub fn shell_icon_rgba(parsing: &str, size: i32) -> Result<Rgba> {
-    use windows::Win32::UI::Shell::SIIGBF_ICONONLY;
+    use windows::Win32::UI::Shell::{SIIGBF_ICONONLY, SIIGBF_SCALEUP};
     // SAFETY: COM call; the bitmap is freed in hbitmap_to_rgba.
     unsafe {
         let factory: IShellItemImageFactory =
@@ -46,7 +46,8 @@ pub fn shell_icon_rgba(parsing: &str, size: i32) -> Result<Rgba> {
         let hbm = get_image_retrying(
             &factory,
             SIZE { cx: size, cy: size },
-            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+            // SCALEUP: small-only icons are scaled up instead of framed in a 256 px tile.
+            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK | SIIGBF_SCALEUP,
         )?;
         hbitmap_to_rgba(hbm)
     }

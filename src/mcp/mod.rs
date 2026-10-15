@@ -18,8 +18,8 @@ use crate::ipc::client::Client;
 pub const INSTRUCTIONS: &str =
     "Ты разбираешь рабочий стол пользователя через Nook. Порядок задают углы:
 ↖ apps — ярлыки, которыми реально пользуются (до ~10), без подписей (hide_caption),
-  в стиле tile (restyle_icon);
-↗ projects — до 5 папок проектов в стиле orb (restyle_icon); неактивные (давно не менялись) — dim;
+  в стиле lifted (restyle_icon);
+↗ projects — до 5 папок проектов в стиле tint (restyle_icon); неактивные (давно не менялись) — dim;
 ↘ inbox — свежее (до 7 дней) и то, что непонятно куда;
 ↙ trash — Корзина.
 

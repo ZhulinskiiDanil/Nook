@@ -131,14 +131,32 @@ impl Default for SafetyConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IconStyle {
-    /// Rounded square in the icon's own (darkened) color.
-    Tile,
-    /// Round glass.
-    Orb,
-    /// Accent-tinted grayscale (inactive items).
+    /// Original icon, full size, with a soft shadow (apps).
+    Lifted,
+    /// Original shape recolored to the accent, keeping its shading (projects).
+    Tint,
+    /// Original, full size, in accent-tinted grayscale (inbox, inactive).
     Muted,
+    /// Rounded square in the icon's own (darkened) color. Kept for configs that ask for it.
+    Tile,
+    /// Round glass plate. Kept for configs that ask for it.
+    Orb,
     /// Keep the stock icon.
     None,
+}
+
+impl IconStyle {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "lifted" => Self::Lifted,
+            "tint" => Self::Tint,
+            "muted" => Self::Muted,
+            "tile" => Self::Tile,
+            "orb" => Self::Orb,
+            "none" => Self::None,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,8 +173,8 @@ impl Default for IconsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            apps: IconStyle::Tile,
-            projects: IconStyle::Orb,
+            apps: IconStyle::Lifted,
+            projects: IconStyle::Tint,
             dim: IconStyle::Muted,
             accent: "#8fb3ff".into(),
         }
@@ -217,8 +235,8 @@ allow_ai_apply = false
 
 [icons]
 enabled = true
-apps = "tile"        # tile | orb | muted | none
-projects = "orb"
+apps = "lifted"      # lifted | tint | muted | tile | orb | none
+projects = "tint"
 dim = "muted"
 accent = "#8fb3ff"   # background of muted icons
 "##;

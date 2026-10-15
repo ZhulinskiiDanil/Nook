@@ -2,6 +2,7 @@
 //! what goes where; Nook previews, applies and undoes.
 
 pub mod adopt;
+pub mod arrows;
 pub mod config;
 pub mod daemon;
 pub mod doctor;
